@@ -15,6 +15,28 @@ func handleAccountsList(w http.ResponseWriter) {
 	sendJSON(w, 200, map[string]any{"ok": true, "count": len(list), "accounts": list})
 }
 
+// handleAccountRename relabels one stored account for the dashboard lists.
+func handleAccountRename(w http.ResponseWriter, r *http.Request) {
+	raw, err := readBody(r)
+	if err != nil {
+		sendJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	var payload struct {
+		ID    string `json:"id"`
+		Label string `json:"label"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || strings.TrimSpace(payload.ID) == "" || strings.TrimSpace(payload.Label) == "" {
+		sendJSON(w, 400, map[string]any{"ok": false, "error": "body must be {\"id\":\"<account>\",\"label\":\"<name>\"}"})
+		return
+	}
+	if !accounts.Rename(strings.TrimSpace(payload.ID), payload.Label) {
+		sendJSON(w, 404, map[string]any{"ok": false, "error": "no stored account with that id"})
+		return
+	}
+	sendJSON(w, 200, map[string]any{"ok": true, "id": strings.TrimSpace(payload.ID), "label": strings.TrimSpace(payload.Label)})
+}
+
 // handleAccountSwitch pins one stored account as the rotation head, which is
 // the credential/plan the next inference call uses.
 func handleAccountSwitch(w http.ResponseWriter, r *http.Request) {

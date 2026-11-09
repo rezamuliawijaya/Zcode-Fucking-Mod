@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,6 +68,7 @@ type Summary struct {
 	Expired       bool   `json:"expired"`
 	NeedsReauth   bool   `json:"needsReauth"`
 	CooldownUntil string `json:"cooldownUntil"`
+	ObtainedAt    string `json:"obtainedAt,omitempty"`
 }
 
 var (
@@ -237,6 +239,28 @@ func SetDefault(id string) bool {
 	return true
 }
 
+// Rename relabels one stored account. Returns false when the id is unknown.
+func Rename(id, label string) bool {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return false
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	rec := readStore()
+	if !containsID(rec.Accounts, id) {
+		return false
+	}
+	for i := range rec.Accounts {
+		if rec.Accounts[i].ID == id {
+			rec.Accounts[i].Label = label
+			break
+		}
+	}
+	_ = writeStore(rec)
+	return true
+}
+
 // List returns every stored account (with secrets — internal use).
 func List() []Account {
 	mu.Lock()
@@ -369,6 +393,7 @@ func Summarize() []Summary {
 			ExpiresAt:   a.ExpiresAt,
 			Expired:     a.ExpiresAt > 0 && a.ExpiresAt <= now.UnixMilli(),
 			NeedsReauth: a.NeedsReauth,
+			ObtainedAt:  a.ObtainedAt,
 		}
 		if st := runtime[a.ID]; st != nil && st.cooldownUntil.After(now) && st.cooldownUntil.Unix() < 1<<59 {
 			s.CooldownUntil = st.cooldownUntil.UTC().Format(time.RFC3339)

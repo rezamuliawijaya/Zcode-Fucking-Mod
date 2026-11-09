@@ -104,6 +104,10 @@ func route(w http.ResponseWriter, r *http.Request) {
 		if requireObservabilityToken(w, r) {
 			handleAccountsPool(w, r)
 		}
+	case r.Method == http.MethodPost && pathName == "/v1/accounts/rename":
+		if requireObservabilityToken(w, r) {
+			handleAccountRename(w, r)
+		}
 	case r.Method == http.MethodPost && pathName == "/v1/accounts/switch":
 		if requireObservabilityToken(w, r) {
 			handleAccountSwitch(w, r)
