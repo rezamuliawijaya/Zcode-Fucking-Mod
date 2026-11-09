@@ -79,8 +79,11 @@ func resolvePlatform() string {
 	return runtime.GOOS + "-" + runtime.GOARCH
 }
 
-// ResolveAppVersion mirrors the desktop client version the asset was
-// captured against. Bump only together with the identity asset.
+// ResolveAppVersion is the control-plane (claim/quota/billing) client
+// version. The LLM lane must NOT use it: plan-lane identity blocks are
+// version-tied, so transport claims the asset's own version
+// (systemprompt.Asset.AppVersion) instead. Bump this only with the
+// claim/marketing requirements.
 func ResolveAppVersion() string {
 	return envOr("ZCODE_IDENTITY_APP_VERSION", "3.17.2")
 }
@@ -103,8 +106,14 @@ type LLMHeaderOpts struct {
 }
 
 // BuildLLMHeaders builds the plan-lane request headers (no device mid).
-// anthropicVersion/anthropicBeta come from the identity asset.
-func BuildLLMHeaders(anthropicVersion, anthropicBeta string, o LLMHeaderOpts) map[string]string {
+// anthropicVersion/anthropicBeta/appVersion come from the identity asset: the
+// gateway ties the identity blocks to the captured client version, so the LLM
+// lane must claim the asset's version, not the claim-plane default.
+func BuildLLMHeaders(anthropicVersion, anthropicBeta, appVersion string, o LLMHeaderOpts) map[string]string {
+	llmVersion := Printable(appVersion)
+	if llmVersion == "" {
+		llmVersion = ResolveAppVersion()
+	}
 	h := map[string]string{
 		"http-referer":          "https://zcode.z.ai",
 		"user-agent":            fmt.Sprintf("%s", Printable(os.Getenv("ZCODE_SDK_USER_AGENT"))),
@@ -116,14 +125,14 @@ func BuildLLMHeaders(anthropicVersion, anthropicBeta string, o LLMHeaderOpts) ma
 		"x-platform":            resolvePlatform(),
 		"x-os-category":         osCategory(runtime.GOOS),
 		"x-os-version":          envOr("ZCODE_IDENTITY_OS_VERSION", "unknown"),
-		"x-zcode-app-version":   ResolveAppVersion(),
+		"x-zcode-app-version":   llmVersion,
 		"anthropic-version":     anthropicVersion,
 		"anthropic-beta":        anthropicBeta,
 		"x-zcode-session-type":  "main",
 		"x-zcode-query-source":  "main_turn",
 	}
 	if ua := h["user-agent"]; ua == "" {
-		h["user-agent"] = fmt.Sprintf("ZCode/%s", ResolveAppVersion())
+		h["user-agent"] = fmt.Sprintf("ZCode/%s", llmVersion)
 	}
 	if o.SessionID != "" {
 		h["x-session-id"] = o.SessionID

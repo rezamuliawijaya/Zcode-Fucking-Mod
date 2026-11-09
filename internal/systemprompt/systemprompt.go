@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -34,13 +35,12 @@ var assetRaw []byte
 
 // Asset mirrors the captured identity file (sanitized for publication).
 type Asset struct {
-	Source            string `json:"source"`
-	CliPrefix         string `json:"cliPrefix"`
-	StablePrefix      string `json:"stablePrefix"`
-	EnvironmentPrefix string `json:"environmentPrefix"`
-	AnthropicVersion  string `json:"anthropicVersion"`
-	AnthropicBeta     string `json:"anthropicBeta"`
-	SDKUserAgent      string `json:"sdkUserAgent"`
+	Source           string `json:"source"`
+	CliPrefix        string `json:"cliPrefix"`
+	StablePrefix     string `json:"stablePrefix"`
+	AnthropicVersion string `json:"anthropicVersion"`
+	AnthropicBeta    string `json:"anthropicBeta"`
+	SDKUserAgent     string `json:"sdkUserAgent"`
 }
 
 var identity Asset
@@ -49,16 +49,27 @@ func init() {
 	if err := json.Unmarshal(assetRaw, &identity); err != nil {
 		panic("zcode-bridge: embedded identity asset is invalid: " + err.Error())
 	}
-	if len(identity.StablePrefix) < 1000 {
+	if len(identity.StablePrefix) < 1500 {
 		panic("zcode-bridge: captured stable prefix is too short to satisfy the identity gate")
-	}
-	if identity.EnvironmentPrefix == "" {
-		panic("zcode-bridge: captured environment block is missing")
 	}
 }
 
 // Captured returns the loaded identity asset.
 func Captured() Asset { return identity }
+
+var appVersionRE = regexp.MustCompile(`ZCode/([0-9]+(?:\.[0-9]+)+)`)
+
+// AppVersion returns the desktop client version the identity asset was
+// captured from, parsed out of SDKUserAgent ("ZCode/3.16.3 ..."). The plan
+// lane ties the identity blocks to this version: claiming any other
+// x-zcode-app-version with these blocks answers 405/3012, so the LLM headers
+// must use this value instead of the claim-plane ResolveAppVersion default.
+func (a Asset) AppVersion() string {
+	if m := appVersionRE.FindStringSubmatch(a.SDKUserAgent); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
 
 // Block is one Anthropic system content block.
 type Block struct {
@@ -100,21 +111,13 @@ func NormalizeClientSystem(system any) string {
 	}
 }
 
-const (
-	cannedOpener = "Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction."
-	leadOutcome  = "Lead with the outcome. Your first sentence after finishing should answer \"what happened\" or \"what did you find\" — the thing the user would ask for if they said \"just give me the TLDR.\" Supporting detail and reasoning come after, for readers who want them."
-)
-
 // BuildSystem builds the 3-block system array for one upstream request.
-// Blocks 1-2 are the captured identity; block 3 is the captured environment
-// prose with the caller's own system prompt spliced in, which keeps the block
-// count at three (a fourth block is rejected with 3012).
+// clientSystem (string | block array | nil) becomes block 3 verbatim.
 func BuildSystem(clientSystem any) []Block {
 	dynamic := NormalizeClientSystem(clientSystem)
-	block3 := strings.ReplaceAll(identity.EnvironmentPrefix, cannedOpener, "")
-	block3 = strings.ReplaceAll(block3, leadOutcome, "")
+	block3 := ""
 	if dynamic != "" {
-		block3 += "\n\n# Client instructions\n" + dynamic
+		block3 = "\n\n" + dynamic
 	}
 	return []Block{
 		{Type: "text", Text: identity.CliPrefix},

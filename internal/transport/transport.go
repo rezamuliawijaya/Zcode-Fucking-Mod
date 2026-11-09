@@ -535,7 +535,7 @@ func attemptOnce(ctx context.Context, client *http.Client, acct candidate, beare
 	traceID := newUUID()
 	queryID := "01a1" + requestID[4:]
 
-	headers := identity.BuildLLMHeaders(systemprompt.Captured().AnthropicVersion, systemprompt.Captured().AnthropicBeta, identity.LLMHeaderOpts{
+	headers := identity.BuildLLMHeaders(systemprompt.Captured().AnthropicVersion, systemprompt.Captured().AnthropicBeta, systemprompt.Captured().AppVersion(), identity.LLMHeaderOpts{
 		SessionID: sessionID, RequestID: requestID, TraceID: traceID, QueryID: queryID,
 	})
 	headers["authorization"] = "Bearer " + bearer
