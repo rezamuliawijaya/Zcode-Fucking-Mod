@@ -1,21 +1,32 @@
 'use strict';
 
 const ZB = window.ZB = {
-  token: sessionStorage.getItem('zbToken') || '',
+  token: sessionStorage.getItem('zbToken') || localStorage.getItem('zbTokenPersist') || '',
   health: null,
   usage: null,
+  net: null,
   quota: null,
   models: null,
   page: 'overview',
   range: '24h',
   live: false,
   esAbort: null,
-  pipeTimer: null,
-  pipeMsgs: [],
-  pipeIdx: 0,
-  started: false,
   lang: localStorage.getItem('zbLang') === 'en' ? 'en' : 'id'
 };
+
+// applyToken/clearToken keep the two storage layers consistent: sessionStorage
+// always holds the working copy, localStorage only when the user opted in.
+function applyToken(v, remember) {
+  ZB.token = v;
+  sessionStorage.setItem('zbToken', v);
+  if (remember) localStorage.setItem('zbTokenPersist', v);
+  else localStorage.removeItem('zbTokenPersist');
+}
+function clearToken() {
+  ZB.token = '';
+  sessionStorage.removeItem('zbToken');
+  localStorage.removeItem('zbTokenPersist');
+}
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -73,32 +84,28 @@ function toast(msg, kind) {
   setTimeout(() => el.remove(), 4200);
 }
 
+// friendlyError maps raw upstream/protocol errors to plain-language hints so a
+// first-time user knows what to do, not just what broke.
+const ERROR_HINTS = [
+  [/3007|captcha verify failed|recaptcha/i, 'Kampanye ini dijaga captcha. Buka aplikasi ZCode desktop (atau zcode.z.ai) untuk klaim manual — setelah itu kuotanya otomatis muncul di sini.'],
+  [/exceed quota limit|kode\s*1005|code[:\s]*1005/i, 'Kuota plan habis. Request akan diterima lagi setelah kuota di-reset; sementara itu kamu bisa klaim plan baru di halaman Klaim plan.'],
+  [/3012|token.*(expired|kadaluarsa)|unauthorized/i, 'Token plan kedaluwarsa atau tidak sah. Coba hubungkan ulang akun di halaman Akun.'],
+  [/3001|device mid/i, 'Device MID belum terbaca. Hubungkan ulang akun dari halaman Akun, lalu muat ulang halaman ini.'],
+  [/invalid bridge token|invalid_api_key/i, 'Kunci API bridge salah. Salin ulang kunci di halaman Pengaturan → Integrasi agen.'],
+  [/token diperlukan/i, 'Halaman ini butuh token bridge. Klik ikon kunci di kanan atas, tempel token kamu, lalu simpan.'],
+  [/plan jwt|belum ada akun|no account/i, 'Belum ada akun Z.ai yang terhubung. Buka halaman Akun, isi label, lalu klik Hubungkan akun.']
+];
+function friendlyError(msg) {
+  const s = String(msg || '');
+  for (const [re, hint] of ERROR_HINTS) if (re.test(s)) return hint;
+  return s;
+}
+
 const EN_TEXT = {
   'Ringkasan': 'Overview',
-  'Akun, pemakaian, dan request terakhir.': 'Accounts, usage, and recent requests.',
-  'Total akun': 'Total accounts',
-  'Akun aktif': 'Active account',
-  'Sisa kuota': 'Quota left',
-  'unit plan aktif': 'plan units',
-  'dipakai lane plan': 'used by the plan lane',
-  'sejak proses hidup': 'since the process started',
-  'keluar + masuk': 'output + input',
-  'token per detik': 'tokens per second',
-  'Tekanan kuota': 'Quota pressure',
-  'Lihat penggunaan': 'View usage',
-  'Semua request': 'All requests',
-  'Belum ada akun tersimpan': 'No stored accounts',
-  'Status tiap akun dan sisa kuota per model.': 'Per-account status and remaining quota by model.',
-  'Akun di pool': 'Account pool',
-  'Billing dibaca per akun, cache 45 detik.': 'Billing is read per account, cached for 45 seconds.',
-  'Hubungkan akun': 'Connect account',
-  'Login Z.ai lewat tautan persetujuan.': 'Sign in to Z.ai through an approval link.',
-  'Membaca kuota semua akun…': 'Reading quota for every account…',
-  'puncak jendela': 'window peak',
-  'offline': 'offline',
-  'Kelola': 'Manage',
   'Akun': 'Accounts',
   'Penggunaan': 'Usage',
+  'Jaringan': 'Network',
   'Klaim plan': 'Plan claim',
   'Pengaturan': 'Settings',
   'Lane, kredensial, kuota, dan lalu lintas proses lokal.': 'Lane, credentials, quota, and local process traffic.',
@@ -122,22 +129,6 @@ const EN_TEXT = {
   'Hubungkan akun': 'Connect account',
   'Label akun baru (mis. kerja)': 'New account label (e.g. work)',
   'Belum ada akun tersimpan. Hubungkan akun Z.ai pertama.': 'No stored accounts yet. Connect your first Z.ai account.',
-  'Akun di pool': 'Account pool',
-  'kuota per model': 'per-model quota',
-  'Segarkan': 'Refresh',
-  'Pool akun ring plan: status tiap akun dan sisa kuota per model.': 'Account pool: per-account status and remaining quota by model.',
-  'Belum ada akun': 'No accounts yet',
-  'Hubungkan akun Z.ai pertama lewat form di bawah.': 'Connect your first Z.ai account with the form below.',
-  'Kuota dibaca langsung dari billing tiap akun; cache 45 detik. Kolom model muncul otomatis dari plan yang terdeteksi.': 'Quota is read from each account billing; 45s cache. Model columns come from detected plans.',
-  'Post baru': 'New post',
-  'tersimpan lokal': 'stored locally',
-  'Plan terdeteksi': 'Plans found',
-  'Pemindaian terakhir': 'Last scan',
-  'Riwayat klaim': 'Claim history',
-  'dari pemindaian terakhir': 'from the last scan',
-  'waktu lokal': 'local time',
-  'percobaan tersimpan': 'stored attempts',
-  'Aktifkan': 'Activate',
   'Setujui tautan ini di browser yang sudah login ke Z.ai:': 'Approve this link in a browser already signed in to Z.ai:',
   'Buka halaman izin': 'Open approval page',
   'Salin tautan': 'Copy link',
@@ -159,6 +150,7 @@ const EN_TEXT = {
   'Durasi': 'Duration',
   'Ukuran': 'Size',
   'Token': 'Tokens',
+  'Jaringan proses': 'Process network',
   'Baca': 'Read',
   'Tulis': 'Write',
   'Total': 'Total',
@@ -169,77 +161,6 @@ const EN_TEXT = {
   'Unggah': 'Upload',
   'semua adapter': 'all adapters',
   'Hari ini': 'Today',
-  'Request': 'Requests',
-  'Kuota': 'Quota',
-  'Lane': 'Lane',
-  'Data': 'Data',
-  'Akun dan angka utama bridge.': 'Accounts and the bridge key numbers.',
-  'Riwayat request di jendela proses ini.': 'Request history for this process window.',
-  'Sisa grant per akun dan model.': 'Remaining grants per account and model.',
-  'Identitas yang dipakai tiap request upstream.': 'Identity used for every upstream request.',
-  'Request terakhir': 'Recent requests',
-  'Tekanan kuota': 'Quota pressure',
-  'Info lane': 'Lane info',
-  'Akun siap': 'Ready accounts',
-  'Token plan': 'Plan token',
-  'Versi app': 'App version',
-  'Terpakai': 'Used',
-  'Sisa': 'Left',
-  'Kelola akun': 'Manage accounts',
-  'Ganti akun': 'Switch account',
-  'Buka →': 'Open →',
-  'Riwayat request': 'Request history',
-  'Grafik kecepatan': 'Speed chart',
-  'Belum ada grant': 'No grants yet',
-  'Base URL, endpoint, model, dan contoh request untuk klien.': 'Base URLs, endpoints, models, and request examples for clients.',
-  'Endpoint LLM memakai kunci bridge; endpoint admin memakai kunci yang sama.': 'LLM endpoints use the bridge key; admin endpoints use the same key.',
-  'Grant per model per akun.': 'Grants per model per account.',
-  'Katalog model aktif dan sisa grant.': 'Live model catalog and remaining grants.',
-  'Chat completion, streaming opsional.': 'Chat completion, optional streaming.',
-  'Messages API, streaming opsional.': 'Messages API, optional streaming.',
-  'Antrean async, balas 202 + id.': 'Async queue, replies 202 + id.',
-  'Status antrean async.': 'Async queue status.',
-  'JSON-RPC lewat streamable HTTP.': 'JSON-RPC over streamable HTTP.',
-  'Statistik pemakaian dan kecepatan.': 'Usage and speed statistics.',
-  'SSE snapshot dan patch.': 'SSE snapshot and patches.',
-  'Konfigurasi efektif bridge.': 'Effective bridge settings.',
-  'Kunci dan URL integrasi.': 'Integration key and URLs.',
-  'Konsol ini.': 'This console.',
-  'Status lane, akun, dan JWT.': 'Lane, account, and JWT status.',
-  'chat completions dan responses': 'chat completions and responses',
-  'messages API': 'messages API',
-  'OpenAI chat completion, streaming.': 'OpenAI chat completion, streaming.',
-  'Anthropic messages, non-stream.': 'Anthropic messages, non-stream.',
-  'Simpan kunci': 'Save key',
-  'Acak kunci': 'Randomize key',
-  'Kunci tidak boleh kosong': 'Key cannot be empty',
-  'Kunci disimpan dan dipakai tab ini': 'Key saved and used by this tab',
-  'Alur live': 'Live pipeline',
-  'Jalur request dari klien sampai upstream.': 'Request path from client to upstream.',
-  'Menunggu request lewat bridge…': 'Waiting for requests through the bridge…',
-  'KLIEN': 'CLIENT',
-  'GATE LOKAL': 'LOCAL GATE',
-  '3-blok identitas': '3-block identity',
-  'RATA-RATA': 'AVERAGE',
-  'REQUEST': 'REQUESTS',
-  'Token hari ini': 'Tokens today',
-  'volume sejak proses hidup': 'volume since process start',
-  'akumulasi harian': 'daily accumulation',
-  'porsi request hari ini': 'request share today',
-  'Sesi operator': 'Operator session',
-  'Kecepatan lane, volume hari ini, dan identitas upstream.': 'Lane speed, today\'s volume, and upstream identity.',
-  'Lane & upstream': 'Lane & upstream',
-  'Identitas yang dipakai tiap request.': 'Identity used for every request.',
-  'Akun di lane': 'Accounts in lane',
-  'Urutan pemakaian saat satu akun sibuk.': 'Usage order when an account is busy.',
-  'Request hari ini': 'Requests today',
-  'Akun aktif': 'Active account',
-  'token per detik': 'tokens per second',
-  'sejak proses hidup': 'since process start',
-  'dipakai lane plan': 'used by the plan lane',
-  'Device mid': 'Device mid',
-  'Peran': 'Role',
-  'siaga': 'standby',
   'hari ini': 'today',
   'Sepanjang waktu': 'All time',
   'Kecepatan': 'Speed',
@@ -275,14 +196,9 @@ const EN_TEXT = {
   'Klaim': 'Claim',
   'Token, kecepatan, dan tren per model.': 'Tokens, speed, and per-model trends.',
   'Klaim sekarang': 'Claim now',
-  'Klaim semua akun': 'Claim all accounts',
   'Cek plan weekend/trial yang tersedia lalu klaim.': 'Check available weekend/trial plans, then claim.',
   'Tidak ada plan yang bisa diklaim.': 'No plans available to claim.',
   'Tekan “Cek plan” untuk memindai penawaran.': 'Press “Check plans” to scan offers.',
-  'Belum ada plan aktif': 'No active plans',
-  'Tekan “Cek plan” untuk memindai penawaran weekend/trial.': 'Press “Check plans” to scan weekend/trial offers.',
-  'Tidak ada plan yang bisa diklaim': 'No plans available to claim',
-  'Coba pindai lagi nanti; penawaran biasanya muncul akhir pekan.': 'Scan again later; offers usually appear on weekends.',
   'Riwayat klaim': 'Claim history',
   'Belum ada riwayat.': 'No history yet.',
   'Buka halaman klaim': 'Open claim page',
@@ -302,6 +218,7 @@ const EN_TEXT = {
   'Memuat detail…': 'Loading details…',
   'Replay terkirim': 'Replay sent',
   'Entri dihapus': 'Entry deleted',
+  'Sharing': 'Sharing',
   'Papan sharing lokal: post, link, gambar, dan komentar tersimpan di bridge ini.': 'Local sharing board: posts, links, images, and comments are stored on this bridge.',
   'Judul': 'Title',
   'Tulis pesan...': 'Write a message...',
@@ -345,6 +262,12 @@ const EN_TEXT = {
   'body bukan JSON yang valid': 'request body is not valid JSON',
   'id wajib diisi': 'id is required',
   '(dipotong)': '(truncated)',
+  'Jaringan': 'Network',
+  'Lalu lintas adapter, koneksi TCP, dan proses ZCode.': 'Adapter traffic, TCP connections, and the ZCode process.',
+  'Proses ZCode': 'ZCode process',
+  'Proses ZCode tidak ditemukan.': 'ZCode process not found.',
+  'Menunggu sampel jaringan…': 'Waiting for network samples…',
+  'Tidak ada adapter.': 'No adapters.',
   'Nilai efektif proses ini. Perubahan env butuh restart.': 'Effective values for this process. Env changes need a restart.',
   'Token & tema': 'Token & theme',
   'Bearer token (sesi tab)': 'Bearer token (tab session)',
@@ -371,6 +294,9 @@ const EN_TEXT = {
   'Token bridge': 'Bridge token',
   'Atur token bridge': 'Set bridge token',
   'Diperlukan saat ZCODE_BRIDGE_TOKEN di-set. Disimpan di sesi tab ini.': 'Required when ZCODE_BRIDGE_TOKEN is set. Stored in this tab session.',
+  'Diperlukan saat ZCODE_BRIDGE_TOKEN atau kunci API di-set. Tanpa centang "Ingat", token hanya tersimpan di sesi tab ini.': 'Required when ZCODE_BRIDGE_TOKEN or the API key is set. Without "Remember", the token is stored only for this tab session.',
+  'Ingat di browser ini': 'Remember on this browser',
+  '(jangan di komputer bersama)': '(not on shared computers)',
   'Token disimpan': 'Token saved',
   'Token dihapus': 'Token deleted',
   'Status stream langsung': 'Live stream status',
@@ -378,6 +304,7 @@ const EN_TEXT = {
   'Buka menu': 'Open menu',
   'lane lokal': 'local lane',
   'memuat lane': 'loading lane',
+  'Buka overlay': 'Open overlay',
   'Lewati ke konten': 'Skip to content',
   '+ Baru': '+ New',
   'Ekspor': 'Export',
@@ -429,7 +356,66 @@ const EN_TEXT = {
   'Impor gagal: ': 'Import failed: ',
   'Database aplikasi tidak terbaca.': 'Application database could not be read.',
   'Belum ada request hari ini.': 'No requests today yet.',
-  'Belum ada request pada rentang ini': 'No requests in this range'
+  'Belum ada request pada rentang ini': 'No requests in this range',
+  'Menghubungkan ke bridge…': 'Connecting to the bridge…',
+  'Bridge belum bisa dipakai: belum ada akun Z.ai yang terhubung.': 'The bridge is not usable yet: no Z.ai account is connected.',
+  'Hubungkan akun →': 'Connect an account →',
+  'Akun sudah terhubung, tapi kuota plan habis. Request ditolak sampai kuota reset.': 'Account is connected, but the plan quota is used up. Requests are rejected until it resets.',
+  'Cek klaim plan →': 'Check plan claims →',
+  'Semua siap. Aplikasi apa pun (Claude Code, Codex, Python) bisa memakai model GLM lewat bridge ini.': 'All set. Any app (Claude Code, Codex, Python) can use GLM models through this bridge.',
+  'Lihat cara sambungkan →': 'See how to connect →',
+  'Mulai di sini': 'Start here',
+  '3 langkah menyambungkan aplikasi': 'connect an app in 3 steps',
+  'Sembunyikan': 'Hide',
+  'Pastikan bridge siap': 'Make sure the bridge is ready',
+  'Banner berwarna di atas adalah status bridge: hijau berarti siap dipakai; kuning atau merah menunjukkan apa yang perlu dibereskan.': 'The colored banner above is the bridge status: green means ready; yellow or red tells you what to fix.',
+  'Salin alamat & kunci API': 'Copy the URL & API key',
+  'Dua nilai inilah "API" milikmu. Kuncinya dibuat lokal dan disimpan di data/agent-key.json.': 'These two values are your "API". The key is generated locally and stored in data/agent-key.json.',
+  'Kunci belum ada: buka Pengaturan → Integrasi agen lalu klik Buat kunci.': 'No key yet: open Settings → Agent integration and click Create key.',
+  'Sambungkan aplikasi kamu': 'Connect your app',
+  'Pilih contoh sesuai aplikasi, salin, tempel. Semua request memakai kuota plan ZCode-mu sendiri.': 'Pick the example for your app, copy, paste. Every request uses your own ZCode plan quota.',
+  'Salin': 'Copy',
+  'Kamus istilah (untuk pemula)': 'Glossary (for beginners)',
+  't/s = token per detik dari request terakhir': 't/s = tokens per second from the last request',
+  'detail koneksi — tidak perlu diubah': 'connection details — nothing to change here',
+  'Contoh koneksi — pilih aplikasimu, salin, jalankan': 'Connection examples — pick your app, copy, run',
+  'Kunci diambil dari env ZCODE_BRIDGE_TOKEN.': 'The key comes from the ZCODE_BRIDGE_TOKEN environment variable.',
+  'Kunci tersimpan lokal di data/agent-key.json.': 'The key is stored locally in data/agent-key.json.',
+  '(tanpa kunci — bridge terbuka di localhost)': '(no key — the bridge is open on localhost)',
+  'Bridge ini terbuka di localhost, jadi klien boleh tanpa kunci. Kalau mau lebih aman, buat kunci di Pengaturan → Integrasi agen.': 'This bridge is open on localhost, so clients need no key. For more safety, create one in Settings → Agent integration.',
+  'Putar ulang request ini? Request dikirim lagi ke ZCode dan memakai kuota plan.': 'Replay this request? It is sent to ZCode again and consumes plan quota.',
+  'Tampilkan kartu "Mulai di sini"': 'Show the "Start here" card',
+  'Kartu "Mulai di sini" tampil lagi di Ringkasan': 'The "Start here" card is visible again on Overview',
+  'Semua kuota plan habis. Request ditolak sampai kuota reset.': 'Every plan quota is used up. Requests are rejected until it resets.',
+  'Kuota menipis: ': 'Quota is running low: ',
+  ' plan masih punya sisa. Request bisa berhenti kapan saja.': ' plan(s) still have quota left. Requests could stop at any time.',
+  'Jembatan lokal: mengubah kuota plan ZCode-mu jadi API yang bisa dipakai aplikasi apa pun.': 'A local bridge: turns your ZCode plan quota into an API any app can use.',
+  'Layanan klaim sedang tidak bisa dihubungi. Coba lagi nanti — bukan karena setup-mu.': 'The claim service is unreachable right now. Try again later — nothing is wrong with your setup.',
+  'Butuh akun Z.ai terhubung dulu — buka halaman Akun.': 'Connect a Z.ai account first — open the Accounts page.',
+  'terlindungi · token aktif': 'protected · token active',
+  'terlindungi · klik untuk set token': 'protected · click to set token',
+  'Kunci API bridge aktif. Klien dan dashboard harus memakai Bearer token.': 'The bridge API key is active. Clients and the dashboard must present a Bearer token.',
+  'Menghubungkan…': 'Connecting…',
+  'Belum ada akun terhubung': 'No account connected',
+  'Kuota habis': 'Quota exhausted',
+  'Kuota menipis: ': 'Quota low: ',
+  ' plan tersisa': ' plan(s) left',
+  'Siap dipakai': 'Ready to use',
+  'Sisa kuota': 'Quota left',
+  'Akses API': 'API access',
+  'Aktivitas terakhir': 'Recent activity',
+  'Detail teknis': 'Technical details',
+  'Kunci dari env ZCODE_BRIDGE_TOKEN': 'Key from the ZCODE_BRIDGE_TOKEN env var',
+  'Kunci tersimpan di data/agent-key.json': 'Key stored in data/agent-key.json',
+  '(tanpa kunci — terbuka di localhost)': '(no key — open on localhost)',
+  'Terbuka di localhost — buat kunci di Pengaturan bila perlu.': 'Open on localhost — create a key in Settings if needed.',
+  'Kunci belum ada — Pengaturan → Integrasi agen.': 'No key yet — Settings → Agent integration.',
+  'Label baru untuk': 'New label for',
+  'Label kosong': 'Label is empty',
+  'Server tidak mengirim konfigurasi captcha — klaim lewat aplikasi ZCode desktop.': 'The server did not ship a captcha config — claim from the ZCode desktop app instead.',
+  'Geser slider untuk verifikasi, klaim lanjut otomatis.': 'Slide to verify; the claim continues automatically.',
+  'Plan berhasil diklaim': 'Plan claimed successfully',
+  'Cek plan weekend/trial yang tersedia lalu klaim. Kampanye ber-captcha minta geser slider sekali — sisanya otomatis.': 'Check available weekend/trial plans, then claim. Captcha-gated campaigns ask for one slider — the rest is automatic.'
 };
 
 const EN_PATTERNS = [
@@ -445,6 +431,8 @@ const EN_PATTERNS = [
   [/^Tampilan: (.+)$/, 'Preview: $1'],
   [/^Kalibrasi (.+)$/, 'Calibration $1'],
   [/^(.+) token$/, '$1 tokens'],
+  [/^(.+) · habis$/, '$1 · empty'],
+  [/^(.+) · menipis$/, '$1 · low'],
   [/^Hapus akun (.+)\?$/, 'Delete account $1?'],
   [/^Hapus percakapan "(.+)"\?$/, 'Delete chat "$1"?'],
   [/^(\d+) percakapan diimpor$/, '$1 chats imported'],
@@ -476,7 +464,7 @@ function translateTextNode(node) {
   node.nodeValue = raw.slice(0, at) + next + raw.slice(at + core.length);
 }
 
-const I18N_SKIP = '.bw,.msg-body,.snippet,script,style,textarea';
+const I18N_SKIP = '.msg-body,.snippet,.share-title,.share-body,.share-author,.share-link,.share-comment-body,.share-comment-author,script,style,textarea';
 
 function translateTree(root) {
   if (ZB.lang !== 'en' || !root) return;
@@ -509,15 +497,16 @@ window.prompt = (message, value) => nativePrompt(tr(message), value);
 
 function applyLanguage() {
   document.documentElement.lang = ZB.lang;
-  $$('.lang-switch button').forEach(btn => {
-    const on = btn.dataset.lang === ZB.lang;
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  const btn = $('#langbtn');
+  if (btn) {
+    btn.textContent = ZB.lang === 'en' ? 'ID' : 'EN';
+    btn.title = ZB.lang === 'en' ? 'Ganti ke Bahasa Indonesia' : 'Switch to English';
+    btn.setAttribute('aria-label', btn.title);
     btn.onclick = () => {
-      if (btn.dataset.lang === ZB.lang) return;
-      localStorage.setItem('zbLang', btn.dataset.lang);
+      localStorage.setItem('zbLang', ZB.lang === 'en' ? 'id' : 'en');
       location.reload();
     };
-  });
+  }
   translateTree(document.body);
   if (!i18nObserver && document.body) {
     i18nObserver = new MutationObserver(mutations => {
@@ -532,7 +521,13 @@ ZB.esc = esc; ZB.fmtN = fmtN; ZB.toast = toast;
 
 function openToken() {
   $('#tokeninput').value = ZB.token;
+  const remember = $('#tokenremember');
+  if (remember) remember.checked = !!localStorage.getItem('zbTokenPersist');
   const d = $('#tokendlg');
+  if (!d) return;
+  // Two concurrent 401s must not double-open the dialog: showModal throws
+  // InvalidStateError on an already-open dialog.
+  if (d.open) return;
   if (typeof d.showModal === 'function') d.showModal(); else d.setAttribute('open', '');
 }
 
@@ -546,7 +541,7 @@ async function api(path, opts = {}) {
   const body = ct.includes('json') ? await res.json() : await res.text();
   if (!res.ok) {
     const msg = body && body.error ? (typeof body.error === 'string' ? body.error : body.error.message) : ('HTTP ' + res.status);
-    throw new Error(msg);
+    throw new Error(friendlyError(msg));
   }
   return body;
 }
@@ -555,290 +550,216 @@ ZB.api = api;
 function route() {
   let hash = location.hash.replace(/^#\/?/, '').split('?')[0];
   if (!hash) hash = location.pathname === '/chat' ? 'chat' : 'overview';
-  if (!['overview', 'accounts', 'chat', 'inspector', 'docs', 'usage', 'claim', 'requests', 'quota', 'lane', 'session', 'settings'].includes(hash)) hash = 'overview';
+  if (!['overview', 'accounts', 'chat', 'sharing', 'inspector', 'usage', 'network', 'claim', 'settings'].includes(hash)) hash = 'overview';
   ZB.page = hash;
   $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === hash));
-  const crumb = $('#crumb');
-  if (crumb) {
-    const active = $$('#nav a').find(a => a.dataset.page === hash);
-    crumb.textContent = active ? active.textContent.trim() : 'Ringkasan';
-  }
+  document.body.classList.toggle('navopen', false);
   document.body.classList.toggle('chat-mode', hash === 'chat');
   const view = $('#view');
   view.innerHTML = '';
   if (hash === 'chat' && window.ZChat) window.ZChat.mount(view);
   else if (hash === 'chat') view.innerHTML = '<div class="empty">Memuat chat…</div>';
-  else ({ overview: pageOverview, accounts: pageAccounts, inspector: pageInspector, docs: pageDocs, usage: pageUsage, claim: pageClaim, requests: pageRequests, quota: pageQuota, lane: pageLane, session: pageSession, settings: pageSettings })[hash](view);
+  else ({ overview: pageOverview, accounts: pageAccounts, sharing: pageSharing, inspector: pageInspector, usage: pageUsage, network: pageNetwork, claim: pageClaim, settings: pageSettings })[hash](view);
   view.scrollTop = 0;
-  blurInTitle(view);
 }
 window.addEventListener('hashchange', route);
 
-function blurInTitle(root) {
-  const h = root && root.querySelector('h1');
-  if (!h || h.dataset.blur) return;
-  const text = tr((h.textContent || '').trim());
-  if (!text) return;
-  h.dataset.blur = '1';
-  h.setAttribute('aria-label', text);
-  h.innerHTML = text.split(' ').map((w, i) =>
-    `<span class="bw" style="animation-delay:${i * 28}ms" aria-hidden="true">${esc(w)}</span>`).join(' ');
-}
-
-function skeleton(title, sub, actions) {
-  return `<header class="page-head"><div><h1>${esc(title)}</h1><p class="page-desc">${esc(sub)}</p></div>${actions ? `<div class="actions">${actions}</div>` : ''}</header>`;
+function skeleton(title, sub) {
+  return `<div class="page-head"><div><h1>${esc(title)}</h1><p>${esc(sub)}</p></div></div>`;
 }
 
 /* ---------------- overview ---------------- */
-const ICON = {
-  users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>',
-  coins: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>',
-  pulse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg>',
-  hash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>',
-  gauge: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 1 1 9-9"/><path d="m12 12 4-4"/><circle cx="12" cy="12" r="1.6"/></svg>',
-  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
-  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>'
-};
+function bannerHTML(kind, icon, text, action) {
+  return `<div class="banner ${kind}" role="status"><span class="bicon" aria-hidden="true">${icon}</span><span class="bbody">${text}</span>${action ? `<span class="bact">${action}</span>` : ''}</div>`;
+}
+
+// overviewBanner turns health+quota state into one short status strip.
+function overviewBanner() {
+  const el = $('#ov-banner'); if (!el) return;
+  const h = ZB.health;
+  if (!h) { el.innerHTML = bannerHTML('warn', '⏳', tr('Menghubungkan…'), ''); return; }
+  const accs = h.accounts || [];
+  if (!accs.length || !(h.planJwt && h.planJwt.present)) {
+    el.innerHTML = bannerHTML('bad', '❌', esc(tr('Belum ada akun terhubung')), '<a href="#/accounts">' + esc(tr('Hubungkan akun →')) + '</a>');
+    return;
+  }
+  const rows = (ZB.quota && ZB.quota.rows) || [];
+  const metered = rows.filter(r => Number(r.total_units) > 0);
+  if (metered.length) {
+    const remOf = r => {
+      const t = Number(r.total_units) || 0, u = Number(r.used_units) || 0;
+      return (r.remaining_units !== undefined && r.remaining_units !== null) ? Number(r.remaining_units) : (t - u);
+    };
+    const alive = metered.filter(r => remOf(r) > 0);
+    if (alive.length === 0) {
+      el.innerHTML = bannerHTML('warn', '⚠️', esc(tr('Kuota habis')), '<a href="#/claim">' + esc(tr('Cek klaim →')) + '</a>');
+      return;
+    }
+    const thinnest = Math.min(...alive.map(r => remOf(r) / Number(r.total_units)));
+    if (alive.length < metered.length || thinnest <= 0.2) {
+      el.innerHTML = bannerHTML('warn', '⚠️', esc(tr('Kuota menipis: ') + alive.length + '/' + metered.length + tr(' plan tersisa')), '<a href="#/claim">' + esc(tr('Cek klaim →')) + '</a>');
+      return;
+    }
+  }
+  // healthy state needs no banner — silence is the good sign
+  el.innerHTML = '';
+}
+
+// integrationSnippets builds copy-ready connection examples for the common
+// clients. `s` is the /v1/integration payload.
+function integrationSnippets(s) {
+  const key = s.key || '<KUNCI_API>';
+  // location.origin is the truthful fallback: this page is served by the
+  // bridge itself, so the origin is the bridge address even on a custom port.
+  const base = (s.base_url || location.origin).replace(/\/+$/, '');
+  const model = s.default_model || 'glm-5.3-flash';
+  return [
+    ['curl', `curl ${base}/v1/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"Halo"}]}'`],
+    ['Python', `# pip install openai\nfrom openai import OpenAI\n\nclient = OpenAI(base_url="${base}/v1", api_key="${key}")\nr = client.chat.completions.create(\n    model="${model}",\n    messages=[{"role": "user", "content": "Halo"}],\n)\nprint(r.choices[0].message.content)`],
+    ['Claude Code', `# CMD:\nset ANTHROPIC_BASE_URL=${base}\nset ANTHROPIC_API_KEY=${key}\nclaude\n\n# PowerShell:\n# $env:ANTHROPIC_BASE_URL="${base}"\n# $env:ANTHROPIC_API_KEY="${key}"`],
+    ['Codex CLI', `# ~/.codex/config.toml\nmodel_provider = "zbridge"\n\n[model_providers.zbridge]\nbase_url = "${base}/v1"\nwire_api = "chat"   # atau "responses"`]
+  ];
+}
+
+// snippetTabs renders a labeled tab strip + copyable snippet block into `box`.
+function snippetTabs(box, s, initial) {
+  if (!box) return;
+  const snips = integrationSnippets(s);
+  let cur = initial && snips.some(x => x[0] === initial) ? initial : snips[0][0];
+  const paint = () => {
+    const text = snips.find(x => x[0] === cur)[1];
+    box.innerHTML = `<div class="sniptabs" role="tablist">${snips.map(x =>
+      `<button type="button" class="${x[0] === cur ? 'active' : ''}" data-snip="${esc(x[0])}">${esc(x[0])}</button>`).join('')}</div>
+      <pre class="snippet">${esc(text)}</pre>
+      <div class="row" style="margin-top:7px"><span class="spacer"></span><button class="btn ghost sm" type="button" data-snipcopy>Salin</button></div>`;
+    box.querySelectorAll('[data-snip]').forEach(b => b.onclick = () => { cur = b.dataset.snip; paint(); });
+    const cp = box.querySelector('[data-snipcopy]');
+    if (cp) cp.onclick = () => copyText(text);
+  };
+  paint();
+}
+
+// renderApiAccess fills the "Akses API" section: URL, key, snippets — data
+// only, no tutorial copy.
+function renderApiAccess() {
+  const el = $('#ov-start'); if (!el) return;
+  el.innerHTML = `
+    <div class="row"><input class="grow mono" id="start-base" readonly aria-label="Base URL"><button class="btn ghost sm" id="start-copybase" type="button">${esc(tr('Salin'))}</button></div>
+    <div class="row" style="margin-top:7px"><input class="grow mono" id="start-key" readonly placeholder="memuat kunci…" aria-label="Kunci API"><button class="btn ghost sm" id="start-copykey" type="button">${esc(tr('Salin'))}</button></div>
+    <p class="small muted" id="start-keynote" style="margin:6px 0 0"></p>
+    <div id="start-snip" style="margin-top:10px"></div>`;
+  api('/v1/integration').then(s => {
+    if (!$('#ov-start') || !$('#start-base')) return;
+    $('#start-base').value = s.base_url || '';
+    $('#start-key').value = s.key || '';
+    if (s.key) {
+      $('#start-keynote').textContent = s.key_source === 'env' ? tr('Kunci dari env ZCODE_BRIDGE_TOKEN') : tr('Kunci tersimpan di data/agent-key.json');
+    } else if (s.key_source === 'none') {
+      $('#start-key').placeholder = tr('(tanpa kunci — terbuka di localhost)');
+      $('#start-keynote').textContent = tr('Terbuka di localhost — buat kunci di Pengaturan bila perlu.');
+    } else {
+      $('#start-keynote').textContent = tr('Kunci belum ada — Pengaturan → Integrasi agen.');
+    }
+    snippetTabs($('#start-snip'), s);
+    $('#start-copybase').onclick = () => copyText(s.base_url || '');
+    $('#start-copykey').onclick = () => copyText(s.key || '');
+  }).catch(e => {
+    if (!$('#start-keynote')) return;
+    $('#start-keynote').textContent = friendlyError(e.message);
+    snippetTabs($('#start-snip'), {});
+  });
+}
 
 function pageOverview(view) {
-  view.innerHTML = skeleton('Ringkasan', 'Akun dan angka utama bridge.', '<button class="btn" id="ovrefresh" type="button">Muat ulang</button>') + `
-  <div class="stat-grid" aria-label="Ringkasan angka">
-    <a class="stat-card" href="#/accounts"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.users}</span><span class="stat-label">Total akun</span></div><p class="stat-value" id="st-accounts">–</p><p class="stat-note">tersimpan lokal</p><div class="stat-more">Kelola akun <span>Buka →</span></div></a>
-    <a class="stat-card" href="#/accounts"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.check}</span><span class="stat-label">Akun aktif</span></div><p class="stat-value" id="st-active">–</p><p class="stat-note">dipakai lane plan</p><div class="stat-more">Ganti akun <span>Buka →</span></div></a>
-    <a class="stat-card" href="#/quota"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.coins}</span><span class="stat-label">Sisa kuota</span></div><p class="stat-value" id="st-quota">–</p><p class="stat-note" id="st-quota-note">unit plan aktif</p><div class="stat-more">Tekanan kuota <span>Buka →</span></div></a>
-    <a class="stat-card" href="#/requests"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.pulse}</span><span class="stat-label">Request hari ini</span></div><p class="stat-value" id="st-req">–</p><p class="stat-note">sejak proses hidup</p><div class="stat-more">Riwayat request <span>Buka →</span></div></a>
-    <a class="stat-card" href="#/usage"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.hash}</span><span class="stat-label">Token hari ini</span></div><p class="stat-value" id="st-tok">–</p><p class="stat-note">keluar + masuk</p><div class="stat-more">Penggunaan <span>Buka →</span></div></a>
-    <a class="stat-card" href="#/usage"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.gauge}</span><span class="stat-label">Kecepatan terakhir</span></div><p class="stat-value" id="st-tps">–</p><p class="stat-note">token per detik</p><div class="stat-more">Grafik kecepatan <span>Buka →</span></div></a>
+  view.innerHTML = skeleton('Dashboard', '') + `
+  <div id="ov-banner"></div>
+  <div class="grid g4" id="ovtiles">
+    <div class="card stat"><span class="k">Kecepatan</span><span class="v" id="ov-tps">-</span><span class="s" id="ov-tpssub">t/s</span></div>
+    <div class="card stat"><span class="k">Request hari ini</span><span class="v" id="ov-req">-</span><span class="s" id="ov-tok">-</span></div>
+    <div class="card stat"><span class="k">Sisa kuota</span><span class="v" id="ov-sisa">-</span><span class="s" id="ov-sisasub">-</span></div>
+    <div class="card stat"><span class="k">Jaringan</span><span class="v smallv" id="ov-net">-</span><span class="s" id="ov-net2">-</span></div>
   </div>
-
-  <article class="card pipe-card">
-    <div class="card-head">
-      <div><h2>Alur live</h2><p class="section-note" id="pipe-note">Jalur request dari klien sampai upstream.</p></div>
-      <span class="pipe-live"><i aria-hidden="true"></i>LIVE</span>
-    </div>
-    <div class="pipe-body">
-      <svg viewBox="0 0 580 172" width="100%" role="img" aria-label="Diagram alur request live">
-        <defs>
-          <marker id="pipeArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto">
-            <path d="M2 1.5L7.5 5L2 8.5" fill="none" stroke="rgba(236,92,19,0.5)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          </marker>
-        </defs>
-        <path class="pipe-link" d="M116,88 L158,88" marker-end="url(#pipeArrow)"/>
-        <path class="pipe-link" d="M268,88 L306,88" marker-end="url(#pipeArrow)"/>
-        <path class="pipe-link dim" d="M411,88 C425,88 435,50 448,50"/>
-        <path class="pipe-link dim" d="M411,88 L448,88"/>
-        <path class="pipe-link dim" d="M411,88 C425,88 435,126 448,126"/>
-        <g class="pipe-flow">
-          <circle r="2.5" fill="var(--accent)"><animateMotion dur="1.05s" repeatCount="indefinite" begin="0s" path="M116,88 L158,88"/></circle>
-          <circle r="1.8" fill="var(--accent)" opacity=".6"><animateMotion dur="1.05s" repeatCount="indefinite" begin="0.35s" path="M116,88 L158,88"/></circle>
-          <circle r="2.5" fill="var(--accent)"><animateMotion dur="0.88s" repeatCount="indefinite" begin="0.18s" path="M268,88 L306,88"/></circle>
-          <circle r="1.8" fill="var(--accent)" opacity=".6"><animateMotion dur="0.88s" repeatCount="indefinite" begin="0.62s" path="M268,88 L306,88"/></circle>
-          <circle r="2.2" fill="var(--accent)" opacity=".9"><animateMotion dur="1.3s" repeatCount="indefinite" begin="0.08s" path="M411,88 C425,88 435,50 448,50"/></circle>
-          <circle r="2.2" fill="var(--accent)" opacity=".9"><animateMotion dur="1.15s" repeatCount="indefinite" begin="0.28s" path="M411,88 L448,88"/></circle>
-          <circle r="2.2" fill="var(--accent)" opacity=".9"><animateMotion dur="1.4s" repeatCount="indefinite" begin="0.45s" path="M411,88 C425,88 435,126 448,126"/></circle>
-        </g>
-        <g>
-          <rect x="16" y="66" width="100" height="44" rx="8" class="pipe-node"/>
-          <text x="66" y="83" text-anchor="middle" class="pipe-k">KLIEN</text>
-          <text x="66" y="100" text-anchor="middle" class="pipe-v">User query</text>
-          <text x="66" y="122" text-anchor="middle" class="pipe-mono">node-01</text>
-        </g>
-        <g>
-          <rect x="158" y="66" width="110" height="44" rx="8" class="pipe-node"/>
-          <text x="213" y="83" text-anchor="middle" class="pipe-k">GATE LOKAL</text>
-          <text x="213" y="100" text-anchor="middle" class="pipe-v">3-blok identitas</text>
-          <text x="213" y="122" text-anchor="middle" class="pipe-mono">bridge</text>
-        </g>
-        <g>
-          <rect x="306" y="53" width="105" height="70" rx="10" class="pipe-core"/>
-          <text x="358" y="78" text-anchor="middle" class="pipe-k hot">LANE PLAN</text>
-          <text x="358" y="97" text-anchor="middle" class="pipe-v hi">Upstream</text>
-          <circle cx="346" cy="113" r="2.8" fill="var(--accent)" class="pipe-dot d1"/>
-          <circle cx="358" cy="113" r="2.8" fill="var(--accent)" class="pipe-dot d2"/>
-          <circle cx="370" cy="113" r="2.8" fill="var(--accent)" class="pipe-dot d3"/>
-          <text x="358" y="139" text-anchor="middle" class="pipe-mono hot">z.ai · plan</text>
-        </g>
-        <g>
-          <rect x="448" y="35" width="116" height="30" rx="7" class="pipe-out"/>
-          <text x="486" y="53.5" text-anchor="middle" class="pipe-out-v">Chat stream</text>
-          <circle cx="550" cy="43" r="3" fill="var(--fg)"/>
-        </g>
-        <g>
-          <rect x="448" y="73" width="116" height="30" rx="7" class="pipe-out"/>
-          <text x="486" y="91.5" text-anchor="middle" class="pipe-out-v">Tool call</text>
-          <circle cx="550" cy="81" r="3" fill="var(--accent)" class="pipe-dot d2"/>
-        </g>
-        <g>
-          <rect x="448" y="111" width="116" height="30" rx="7" class="pipe-out"/>
-          <text x="486" y="129.5" text-anchor="middle" class="pipe-out-v">Penggunaan</text>
-          <circle cx="550" cy="119" r="3" fill="var(--accent)" class="pipe-dot d3"/>
-        </g>
-      </svg>
-    </div>
-    <div class="pipe-tick">
-      <span class="pipe-caret" aria-hidden="true">›</span>
-      <p class="pipe-msg" id="pipe-msg">Menunggu request lewat bridge…</p>
-    </div>
-    <div class="pipe-foot">
-      <div><span>REQUEST</span><b id="pipe-req">–</b></div>
-      <div><span>TOKEN</span><b id="pipe-tok">–</b></div>
-      <div><span>RATA-RATA</span><b id="pipe-avg">–</b></div>
-      <div class="pipe-stack"><span>STACK</span><b id="pipe-stack">z.ai · plan</b></div>
-    </div>
-  </article>
-
-  <article class="card overview-accounts">
-    <div class="card-head">
-      <div><h2>Akun</h2><p class="section-note" id="ov-accounts-note">Memuat akun.</p></div>
-      <div class="actions"><a class="btn small" href="#/accounts">Kelola</a></div>
-    </div>
-    <div id="ov-accounts"><div class="empty">Memuat akun…</div></div>
-  </article>`;
-  $('#ovrefresh').onclick = () => { refreshHealth(); loadUsage(true); loadOverviewExtras(); };
+  <div class="sec"><h2>Akses API</h2><div class="card" id="ov-start"></div></div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="sec"><h2>Akun</h2><div class="card" id="ov-accounts"><div class="empty">Memuat…</div></div></div>
+    <div class="sec"><h2>Aktivitas terakhir</h2><div class="card" id="ov-recent"><div class="empty">Belum ada data.</div></div></div>
+  </div>
+  <div class="sec"><h2>Klaim plan</h2><div class="card" id="ov-claim"><div class="empty">Memuat…</div></div></div>
+  <div class="sec"><h2>Jaringan</h2><div class="card" id="ov-netcard"><div class="empty">Menunggu sampel…</div></div></div>
+  <details class="kamus"><summary>Detail teknis</summary><dl class="kv">
+    <dt>Lane</dt><dd id="ov-lane">-</dd>
+    <dt>Upstream</dt><dd id="ov-up" class="mono" style="font-size:11px">-</dd>
+    <dt>Versi app</dt><dd id="ov-ver">-</dd>
+    <dt>Device MID</dt><dd id="ov-mid">-</dd>
+    <dt>Auth</dt><dd id="ov-authmode">-</dd>
+    <dt>Token plan</dt><dd id="ov-jwt">-</dd>
+  </dl></details>`;
+  overviewBanner();
+  renderApiAccess();
   patchOverview();
   loadOverviewExtras();
 }
 
 function patchOverview() {
-  const h = ZB.health || {}, u = ZB.usage;
-  if (!$('#st-accounts')) return;
-  const accounts = h.accounts || [];
-  $('#st-accounts').textContent = fmtN(accounts.length);
-  $('#st-active').textContent = fmtN(accounts.filter(a => a.active || a.default).length);
-  const q = ZB.quota;
-  if (q && q.rows && q.rows.length) {
-    const rem = q.rows.reduce((s, r) => {
-      const total = Number(r.total_units) || 0, used = Number(r.used_units) || 0;
-      const left = r.remaining_units != null ? Number(r.remaining_units) : (r.used_units != null ? total - used : total);
-      return s + (Number.isFinite(left) ? left : 0);
-    }, 0);
-    $('#st-quota').textContent = fmtN(rem);
-    $('#st-quota-note').textContent = q.rows.length + ' model plan';
-  } else if (q) {
-    $('#st-quota').textContent = '–';
-    $('#st-quota-note').textContent = 'tidak ada grant';
-  }
+  const h = ZB.health || {}, u = ZB.usage, n = ZB.net;
+  overviewBanner();
+  if (!$('#ov-tps')) return;
   if (u) {
-    $('#st-req').textContent = fmtN(u.today && u.today.requests);
-    $('#st-tok').textContent = fmtN((u.today && u.today.output_tokens || 0) + (u.today && u.today.input_tokens || 0));
-    $('#st-tps').textContent = fmtTps(u.rings && u.rings.last_tps);
+    $('#ov-tps').textContent = fmtTps(u.rings && u.rings.last_tps);
+    $('#ov-req').textContent = fmtN(u.today && u.today.requests);
+    $('#ov-tok').textContent = fmtN((u.today && u.today.output_tokens)) + ' token keluar · ' + fmtN((u.today && u.today.input_tokens)) + ' masuk';
   }
-  const note = $('#ov-accounts-note');
-  if (note) note.textContent = accounts.length ? accounts.length + ' akun siap' : 'Belum ada akun tersimpan';
-  renderPipeline();
-}
-
-function pipelineMessages() {
-  const rows = ((ZB.usage && ZB.usage.recent) || []).slice(-8).reverse();
-  if (!rows.length) return ['Menunggu request lewat bridge…'];
-  return rows.map(r => `${prettyModel(r.model || 'request')} · ${fmtN(r.output_tokens)} token · ${fmtTps(r.tps)} t/s · ${when(r.at)}`);
-}
-
-function showPipeMsg() {
-  const el = $('#pipe-msg');
-  if (!el || !ZB.pipeMsgs.length) return;
-  el.textContent = ZB.pipeMsgs[ZB.pipeIdx % ZB.pipeMsgs.length];
-  el.classList.remove('in');
-  void el.offsetWidth;
-  el.classList.add('in');
-}
-
-function renderPipeline() {
-  if (!$('#pipe-msg')) return;
-  const h = ZB.health || {}, u = ZB.usage;
-  const accounts = h.accounts || [];
-  const today = (u && u.today) || {};
-  const note = $('#pipe-note');
-  if (note) note.textContent = `${accounts.length} akun · ${fmtN(today.requests || 0)} request hari ini`;
-  $('#pipe-req').textContent = u ? fmtN(today.requests || 0) : '–';
-  $('#pipe-tok').textContent = u ? fmtN((today.output_tokens || 0) + (today.input_tokens || 0)) : '–';
-  $('#pipe-avg').textContent = u ? fmtTps(today.avg_tps) + ' t/s' : '–';
-  $('#pipe-stack').textContent = h.upstream ? String(h.upstream).replace(/^https?:\/\//, '').split('/')[0] : 'z.ai · plan';
-  ZB.pipeMsgs = pipelineMessages();
-  if (!ZB.pipeTimer) {
-    ZB.pipeIdx = 0;
-    ZB.pipeTimer = setInterval(() => {
-      if (ZB.page !== 'overview' || !$('#pipe-msg')) {
-        clearInterval(ZB.pipeTimer);
-        ZB.pipeTimer = null;
-        return;
-      }
-      ZB.pipeIdx = (ZB.pipeIdx + 1) % Math.max(1, ZB.pipeMsgs.length);
-      showPipeMsg();
-    }, 2700);
+  const acct = (h.accounts || []).find(a => a.active) || (h.accounts || [])[0];
+  const acctEl = $('#ov-acct');
+  if (acctEl) acctEl.textContent = acct ? (acct.label || acct.id || 'default') : '-';
+  const authEl = $('#ov-auth');
+  if (authEl) authEl.textContent = h.auth || '-';
+  $('#ov-lane').textContent = h.lane || '-';
+  $('#ov-up').textContent = h.upstream || '-';
+  $('#ov-ver').textContent = h.version || '-';
+  $('#ov-mid').textContent = h.deviceMid || '-';
+  $('#ov-authmode').textContent = h.auth || '-';
+  $('#ov-jwt').textContent = h.planJwt && h.planJwt.present ? ('ada (' + (h.planJwt.count || 1) + ' akun)') : 'tidak ada';
+  if (n) {
+    $('#ov-net').textContent = '↓ ' + fmtBps(n.total_in_bps) + ' · ↑ ' + fmtBps(n.total_out_bps);
+    $('#ov-net2').textContent = (n.tcp_connections || 0) + ' koneksi TCP, ' + (n.tcp_established || 0) + ' established';
   }
-  showPipeMsg();
-}
-
-function patchSideStats() { renderSession(); }
-
-function renderSession() {
-  const h = ZB.health || {}, u = ZB.usage;
-  const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
-  if (!document.getElementById('ses-tps')) return;
-  set('ses-tps', u && u.rings ? fmtTps(u.rings.last_tps) + ' <small>t/s</small>' : '-');
-  set('ses-req', u && u.today ? fmtN(u.today.requests) : '-');
-  const accounts = h.accounts || [];
-  const active = accounts.find(a => a.active || a.default) || accounts[0];
-  set('ses-acct', active ? esc(active.label || active.id) : '–');
-  set('ses-lane', esc(h.lane || '-'));
-  set('ses-up', esc(h.upstream || '-'));
-  set('ses-ver', esc(h.version || '-'));
-  set('ses-mid', esc(h.deviceMid || '-'));
-  set('ses-auth', esc(h.auth || '-'));
-  set('ses-jwt', h.planJwt && h.planJwt.present ? `ada (${h.planJwt.count || 1} akun)` : 'tidak ada');
-  const state = document.getElementById('ses-state');
-  if (state) {
-    const off = h.live === false;
-    state.className = 'badge ' + (off ? 'bad' : 'ok');
-    state.textContent = off ? 'offline' : 'aktif';
+  if (u && u.recent && u.recent.length) {
+    const rows = u.recent.slice(-8).reverse();
+    $('#ov-recent').innerHTML = '<div class="tablewrap"><table><thead><tr><th>Waktu</th><th>Model</th><th class="num">Token keluar</th><th class="num">t/s</th></tr></thead><tbody>' +
+      rows.map(r => `<tr><td>${when(r.at)}</td><td>${esc(r.model)}</td><td class="num">${fmtN(r.output_tokens)}</td><td class="num">${fmtTps(r.tps)}</td></tr>`).join('') +
+      '</tbody></table></div>';
   }
-  set('ses-accounts', accounts.length
-    ? '<ul class="lane-accounts">' + accounts.map(a => `<li class="${a.active || a.default ? 'is-active' : ''}">
-        <span class="account-avatar" aria-hidden="true">${esc(accountInitials(a.label || a.id))}</span>
-        <span class="lane-account-main"><b>${esc(a.label || a.id)}</b><span class="account-sub">${esc(a.email || a.id)}</span></span>
-        <span class="acct-badges">${a.active || a.default ? '<span class="badge ok">aktif</span>' : '<span class="badge">siaga</span>'}${a.needsReauth ? '<span class="badge bad">perlu login</span>' : ''}</span>
-      </li>`).join('') + '</ul>'
-    : '<div class="empty"><b>Belum ada akun</b><span class="empty-hint">Hubungkan akun lewat halaman Akun.</span></div>');
+  if (n && n.process) {
+    const p = n.process;
+    $('#ov-netcard').innerHTML = `
+      <div class="grid g3">
+        <div class="stat"><span class="k">Baca</span><span class="v smallv">${fmtBps(p.read_bps)}</span><span class="s">${fmtBytes(p.read_bytes)} total</span></div>
+        <div class="stat"><span class="k">Tulis</span><span class="v smallv">${fmtBps(p.write_bps)}</span><span class="s">${fmtBytes(p.write_bytes)} total</span></div>
+        <div class="stat"><span class="k">CPU</span><span class="v smallv">${(p.cpu_percent || 0).toFixed(1)}%</span><span class="s">${p.found ? esc(p.name) : 'proses tidak ditemukan'}</span></div>
+      </div>`;
+  }
+  if (u && u.rings) {
+    const t = $('#sidetps'); if (t) t.textContent = fmtTps(u.rings.last_tps) + ' t/s';
+    const r = $('#sidereq'); if (r) r.textContent = fmtN(u.today && u.today.requests);
+  }
+  if (n) { const e = $('#sidenet'); if (e) e.textContent = '↓' + fmtBps(n.total_in_bps) + ' ↑' + fmtBps(n.total_out_bps); }
 }
 
-function pageSession(view) {
-  view.innerHTML = skeleton('Sesi operator', 'Kecepatan lane, volume hari ini, dan identitas upstream.', '<button class="btn" id="ses-refresh" type="button">Segarkan</button>') + `
-  <div class="stat-grid">
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.gauge}</span><span class="stat-label">Kecepatan</span></div><div class="stat-value" id="ses-tps">-</div><div class="stat-note">token per detik</div></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.pulse}</span><span class="stat-label">Request hari ini</span></div><div class="stat-value" id="ses-req">-</div><div class="stat-note">sejak proses hidup</div></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.users}</span><span class="stat-label">Akun aktif</span></div><div class="stat-value" id="ses-acct">-</div><div class="stat-note">dipakai lane plan</div></article>
-  </div>
-  <div class="split">
-    <article class="card"><div class="card-head"><div><h2>Lane &amp; upstream</h2><p class="section-note">Identitas yang dipakai tiap request.</p></div></div>
-      <dl class="lane-facts">
-        <div><dt>Lane</dt><dd id="ses-lane">-</dd></div>
-        <div><dt>Upstream</dt><dd id="ses-up">-</dd></div>
-        <div><dt>Status</dt><dd><span class="badge" id="ses-state">-</span></dd></div>
-        <div><dt>Versi</dt><dd id="ses-ver">-</dd></div>
-        <div><dt>Device mid</dt><dd id="ses-mid">-</dd></div>
-        <div><dt>Autentikasi</dt><dd id="ses-auth">-</dd></div>
-        <div><dt>Plan JWT</dt><dd id="ses-jwt">-</dd></div>
-      </dl>
-    </article>
-    <article class="card"><div class="card-head"><div><h2>Akun di lane</h2><p class="section-note">Urutan pemakaian saat satu akun sibuk.</p></div></div>
-      <div id="ses-accounts" aria-live="polite"><div class="empty">Membaca akun…</div></div>
-    </article>
-  </div>`;
-  $('#ses-refresh').onclick = async () => {
-    await refreshHealth();
-    try { ZB.usage = await api('/v1/usage'); } catch (e) { /* keep stale */ }
-    renderSession();
-    toast('Sesi diperbarui', 'ok');
-  };
-  renderSession();
+function patchSideStats() {
+  const u = ZB.usage, n = ZB.net;
+  if (u && u.rings) {
+    const t = $('#sidetps'); if (t) t.textContent = fmtTps(u.rings.last_tps) + ' t/s';
+    const r = $('#sidereq'); if (r) r.textContent = fmtN(u.today && u.today.requests);
+  }
+  if (n) { const e = $('#sidenet'); if (e) e.textContent = '↓' + fmtBps(n.total_in_bps) + ' ↑' + fmtBps(n.total_out_bps); }
 }
 
 let accountFlow = null, accountTimer = null;
 
 function accountBadges(a) {
   const out = [];
+  if (a.default) out.push('<span class="badge ok">aktif</span>');
   if (a.expired) out.push('<span class="badge bad">kedaluwarsa</span>');
   if (a.needsReauth) out.push('<span class="badge bad">perlu login</span>');
   if (a.cooldownUntil) out.push('<span class="badge warn">jeda</span>');
@@ -846,53 +767,48 @@ function accountBadges(a) {
   return out.join('') || '<span class="badge">siap</span>';
 }
 
-function accountInitials(s) {
-  const parts = String(s || '?').trim().split(/\s+/);
-  return ((parts[0] || '')[0] || '?').toUpperCase() + ((parts[1] || '')[0] || '').toUpperCase();
-}
-
 function renderAccountCard() {
   const accounts = (ZB.health && ZB.health.accounts) || [];
-  const box = $('#ov-accounts');
+  const box = $('#acc-page') || $('#ov-accounts');
   if (!box) return;
-  const note = $('#ov-accounts-note');
-  if (note) note.textContent = accounts.length ? accounts.length + ' akun siap' : 'Belum ada akun tersimpan';
-  if (!accounts.length) {
-    box.innerHTML = '<div class="empty"><b>Belum ada akun</b><span class="empty-hint">Hubungkan akun Z.ai lewat halaman Akun.</span></div>';
-    return;
-  }
-  const pool = (ZB.pool && ZB.pool.accounts) || [];
-  box.innerHTML = '<ul class="overview-account-list">' + accounts.map(a => {
-    const pr = pool.find(x => x.id === a.id);
-    const rows = (pr && pr.rows) || [];
-    const rem = rows.reduce((s, r) => s + (Number(r.remaining) || 0), 0);
-    const active = a.active || a.default;
-    const right = rows.length
-      ? `<b>${poolUnits(rem)}</b>unit · ${rows.length} model`
-      : '<b>–</b> tanpa grant';
-    return `<li class="overview-account ${active ? 'is-active' : ''}">
-      <div class="account-main"><span class="account-avatar" aria-hidden="true">${esc(accountInitials(a.label || a.id))}</span>
-        <div style="min-width:0"><h3>${esc(a.label || a.id)}${a.default ? '<span class="badge ok">aktif</span>' : ''}${a.needsReauth ? '<span class="badge bad">perlu login</span>' : ''}</h3>
-        <p class="account-sub">${esc(a.email || a.id)}</p></div>
-      </div>
-      <div class="overview-account-points">${right}</div>
-    </li>`;
-  }).join('') + '</ul>';
-}
+  box.innerHTML =
+    (accounts.length ? '<div class="tablewrap"><table><thead><tr><th class="num">No</th><th>Akun</th><th>Status</th><th>Login</th><th>Aksi</th></tr></thead><tbody>' + accounts.map((a, i) => `
+      <tr>
+        <td class="num dim">${i + 1}</td>
+        <td><b>${esc(a.label || a.id)}</b>${a.email ? ' <span class="small muted mono">' + esc(a.email) + '</span>' : ''}<div class="small muted mono">${esc(a.id)}</div></td>
+        <td>${accountBadges(a)}</td>
+        <td class="dim small">${a.obtainedAt ? when(a.obtainedAt) : '—'}</td>
+        <td><div class="acct-act">${a.default ? '' : `<button class="btn ghost sm" data-acc-use="${esc(a.id)}" type="button">Aktifkan</button>`}<button class="btn ghost sm" data-acc-ren="${esc(a.id)}" data-acc-label="${esc(a.label || a.id)}" type="button">Ubah</button><button class="btn ghost sm danger" data-acc-del="${esc(a.id)}" data-acc-label="${esc(a.label || a.id)}" type="button">Hapus</button></div></td>
+      </tr>`).join('') + '</tbody></table></div>'
+      : '<div class="empty">Belum ada akun tersimpan. Hubungkan akun Z.ai pertama.</div>') +
+    `<form id="acc-add" class="row" style="margin-top:10px"><input id="acc-label" class="grow" maxlength="40" placeholder="Label akun baru (mis. kerja)" autocomplete="off"><button class="btn" id="acc-addbtn" type="submit">Hubungkan akun</button></form>` +
+    '<div id="acc-flow"></div>';
 
-function bindAccountActions(root) {
-  root.querySelectorAll('[data-acc-use]').forEach(btn => {
+  box.querySelectorAll('[data-acc-ren]').forEach(btn => {
+    btn.onclick = async () => {
+      const label = prompt(tr('Label baru untuk') + ' ' + btn.dataset.accLabel + ':', btn.dataset.accLabel);
+      if (label === null) return;
+      const v = label.trim();
+      if (!v) { toast(tr('Label kosong'), 'bad'); return; }
+      btn.disabled = true;
+      try {
+        await api('/v1/accounts/rename', { method: 'POST', body: JSON.stringify({ id: btn.dataset.accRen, label: v }) });
+        toast('Label diubah ke "' + v + '"', 'ok');
+        await refreshHealth();
+      } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
+    };
+  });
+  box.querySelectorAll('[data-acc-use]').forEach(btn => {
     btn.onclick = async () => {
       btn.disabled = true;
       try {
         await api('/v1/accounts/switch', { method: 'POST', body: JSON.stringify({ id: btn.dataset.accUse }) });
         toast('Akun aktif diganti', 'ok');
         await refreshHealth();
-        if (ZB.page === 'accounts') loadPool(true);
       } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
     };
   });
-  root.querySelectorAll('[data-acc-del]').forEach(btn => {
+  box.querySelectorAll('[data-acc-del]').forEach(btn => {
     btn.onclick = async () => {
       if (!confirm('Hapus akun ' + btn.dataset.accLabel + '? Token plan ikut dihapus dari penyimpanan lokal.')) return;
       btn.disabled = true;
@@ -900,16 +816,11 @@ function bindAccountActions(root) {
         await api('/v1/accounts/remove', { method: 'POST', body: JSON.stringify({ id: btn.dataset.accDel }) });
         toast('Akun dihapus', 'ok');
         await refreshHealth();
-        if (ZB.page === 'accounts') loadPool(true);
       } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
     };
   });
-}
-
-function bindAccountForm(root) {
-  const form = root.querySelector('#acc-add');
-  if (!form) return;
-  form.onsubmit = async ev => {
+  const form = $('#acc-add');
+  if (form) form.onsubmit = async ev => {
     ev.preventDefault();
     const label = ($('#acc-label').value || '').trim();
     const addBtn = $('#acc-addbtn');
@@ -926,94 +837,14 @@ function bindAccountForm(root) {
       addBtn.disabled = false;
     }
   };
-}
-
-/* pool akun: status + sisa kuota per model untuk SEMUA akun */
-function poolErrText(e) {
-  if (/empty plan list/i.test(e)) return 'tidak ada grant di plan akun ini';
-  if (/status 429/i.test(e)) return 'billing sibuk (429), coba Segarkan';
-  if (/status 5\d\d/i.test(e)) return 'billing error, coba Segarkan';
-  if (/^balance:/i.test(e)) return e.replace(/^balance:\s*/i, 'billing: ');
-  return e;
-}
-
-function prettyModel(m) {
-  return String(m).replace(/^glm/i, 'GLM').replace(/-([a-z])/g, (_, c) => '-' + c.toUpperCase());
-}
-
-function poolUnits(n) {
-  n = Number(n) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' B';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + ' K';
-  return String(Math.round(n));
-}
-
-async function loadPool(force) {
-  const box = $('#acc-pool');
-  if (!box) return;
-  if (force) box.setAttribute('aria-busy', 'true');
-  try {
-    ZB.pool = await api('/v1/accounts/pool' + (force ? '?force=1' : ''));
-    renderPool();
-  } catch (e) {
-    box.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
-  }
-}
-
-function renderPool() {
-  const box = $('#acc-pool');
-  const p = ZB.pool;
-  if (!box || !p) return;
-  const accs = p.accounts || [];
-  if (!accs.length) {
-    box.innerHTML = `<div class="empty"><b>Belum ada akun</b><span class="empty-hint">Hubungkan akun Z.ai pertama lewat form di bawah.</span></div>`;
-    return;
-  }
-  box.innerHTML = '<div class="tablewrap acct-table-wrap"><table class="acct-table">' +
-    '<thead><tr><th>Akun</th><th>Status</th><th>Kuota per model</th><th class="num">Sisa</th><th></th></tr></thead><tbody>' +
-    accs.map(a => {
-      const rows = a.rows || [];
-      const rem = rows.reduce((s, r) => s + Number(r.remaining || 0), 0);
-      const fit = rows.map(r => {
-        const used = Number(r.used || 0), total = Number(r.total || 0);
-        return `<div class="acct-fact">
-          <span class="acct-model">${esc(prettyModel(r.model))}</span>
-          <b>${poolUnits(r.remaining)} / ${poolUnits(r.total)}</b>
-          <div class="pool-bar"><span style="width:${pct(used, total).toFixed(1)}%"></span></div>
-        </div>`;
-      }).join('');
-      return `<tr class="${a.default ? 'is-active' : ''}">
-        <td><div class="acct-who"><span class="account-avatar" aria-hidden="true">${esc(accountInitials(a.label || a.id))}</span>
-          <div style="min-width:0"><b>${esc(a.label || a.id)}</b><span class="account-sub">${esc(a.email || a.id)}</span></div>
-        </div></td>
-        <td><span class="acct-badges">${a.default ? '<span class="badge ok">aktif</span>' : ''}${accountBadges(a)}</span>${a.error ? `<div class="acct-error">${esc(poolErrText(a.error))}</div>` : ''}</td>
-        <td><div class="acct-facts">${fit || (a.error ? '<span class="acct-model">–</span>' : '<span class="acct-model">tanpa grant</span>')}</div></td>
-        <td class="num">${rows.length ? `<b>${poolUnits(rem)}</b><span class="account-sub">${rows.length} model</span>` : '–'}</td>
-        <td class="acct-actions">
-          ${a.default ? '' : `<button class="btn ghost sm" data-acc-use="${esc(a.id)}" type="button">Aktifkan</button>`}
-          <button class="btn ghost sm danger" data-acc-del="${esc(a.id)}" data-acc-label="${esc(a.label || a.id)}" type="button">Hapus</button>
-        </td></tr>`;
-    }).join('') + '</tbody></table></div>' +
-    '<p class="small muted pool-note">Kuota dibaca langsung dari billing tiap akun; cache 45 detik. Kolom model muncul otomatis dari plan yang terdeteksi.</p>';
-  bindAccountActions(box);
+  renderAccountFlow();
 }
 
 function pageAccounts(view) {
-  view.innerHTML = skeleton('Akun', 'Status tiap akun dan sisa kuota per model.', '<button class="btn" id="pool-refresh" type="button">Segarkan</button>') + `
-  <article class="card">
-    <div class="card-head"><div><h2>Akun di pool</h2><p class="section-note">Billing dibaca per akun, cache 45 detik.</p></div></div>
-    <div id="acc-pool" aria-live="polite"><div class="empty">Membaca kuota semua akun…</div></div>
-  </article>
-  <article class="card mt14">
-    <div class="card-head"><div><h2>Hubungkan akun</h2><p class="section-note">Login Z.ai lewat tautan persetujuan.</p></div></div>
-    <form id="acc-add" class="row"><input id="acc-label" class="grow" maxlength="40" placeholder="Label akun baru (mis. kerja)" autocomplete="off"><button class="btn primary" id="acc-addbtn" type="submit">Hubungkan akun</button></form>
-    <div id="acc-flow"></div>
-  </article>`;
-  $('#pool-refresh').onclick = () => loadPool(true);
-  bindAccountForm(view);
-  renderAccountFlow();
-  loadPool(false);
+  view.innerHTML = skeleton('Akun', 'Ring plan lokal: koneksi, akun aktif, dan masa berlaku.') +
+    '<div class="card" id="acc-page"><div class="empty">Memuat...</div></div>';
+  renderAccountCard();
+  refreshHealth();
 }
 
 function renderAccountFlow() {
@@ -1022,14 +853,14 @@ function renderAccountFlow() {
   if (!accountFlow) { el.innerHTML = ''; return; }
   if (accountFlow.status === 'pending') {
     el.innerHTML = `<div class="flow"><div class="small muted">Setujui tautan ini di browser yang sudah login ke Z.ai:</div>
-      <div class="row mt6"><a class="btn sm" href="${esc(accountFlow.url)}" target="_blank" rel="noopener">Buka halaman izin</a><button class="btn ghost sm" id="accflow-copy" type="button">Salin tautan</button><button class="btn ghost sm" id="accflow-cancel" type="button">Batal</button></div>
-      <div id="accflow-stat" class="mt6">Menunggu persetujuan...</div></div>`;
+      <div class="row" style="margin-top:6px"><a class="btn sm" href="${esc(accountFlow.url)}" target="_blank" rel="noopener">Buka halaman izin</a><button class="btn ghost sm" id="accflow-copy" type="button">Salin tautan</button><button class="btn ghost sm" id="accflow-cancel" type="button">Batal</button></div>
+      <div class="small muted" id="accflow-stat" style="margin-top:6px">Menunggu persetujuan...</div></div>`;
     const copy = $('#accflow-copy');
     if (copy) copy.onclick = () => copyText(accountFlow.url);
     const cancel = $('#accflow-cancel');
     if (cancel) cancel.onclick = cancelAccountLogin;
   } else {
-    el.innerHTML = `<div class="flow"><div class="small ${accountFlow.status === 'ok' ? 'muted' : 'danger'}">${esc(accountFlow.error || (accountFlow.status === 'ok' ? 'Akun terhubung.' : 'Login dibatalkan.'))}</div><div class="row mt6"><button class="btn ghost sm" id="accflow-close" type="button">Tutup</button></div></div>`;
+    el.innerHTML = `<div class="flow"><div class="small ${accountFlow.status === 'ok' ? 'muted' : 'danger'}">${esc(accountFlow.error || (accountFlow.status === 'ok' ? 'Akun terhubung.' : 'Login dibatalkan.'))}</div><div class="row" style="margin-top:6px"><button class="btn ghost sm" id="accflow-close" type="button">Tutup</button></div></div>`;
     const close = $('#accflow-close');
     if (close) close.onclick = () => { accountFlow = null; renderAccountFlow(); };
   }
@@ -1066,238 +897,143 @@ async function cancelAccountLogin() {
   const addBtn = $('#acc-addbtn'); if (addBtn) addBtn.disabled = false;
 }
 
-async function loadOverviewExtras() {
-  api('/v1/quota').then(q => { ZB.quota = q; patchOverview(); }).catch(() => {});
-  api('/v1/accounts/pool').then(p => { ZB.pool = p; renderAccountCard(); }).catch(() => {});
-}
-
-/* ---------------- requests ---------------- */
-function pageRequests(view) {
-  view.innerHTML = skeleton('Request', 'Riwayat request di jendela proses ini.', '<button class="btn" id="req-refresh" type="button">Muat ulang</button>') + `
-  <article class="card">
-    <div class="card-head"><div><h2>Request terakhir</h2><p class="section-note" id="req-note">Memuat riwayat.</p></div><a class="link" href="#/usage">Penggunaan</a></div>
-    <div id="req-list"><div class="empty">Memuat request…</div></div>
-  </article>`;
-  $('#req-refresh').onclick = async () => {
-    await loadUsage(true);
-    renderRequests();
-    toast('Request diperbarui', 'ok');
+// quotaTableHTML renders the full plan-quota table (no prose).
+function quotaTableHTML(rows) {
+  const remOf = r => {
+    const t = Number(r.total_units) || 0, u = Number(r.used_units) || 0;
+    return (r.remaining_units !== undefined && r.remaining_units !== null) ? Number(r.remaining_units) : (t - u);
   };
-  renderRequests();
+  return `<div class="tablewrap"><table><thead><tr><th>Model</th><th>Plan</th><th class="num">Sisa</th><th>Terpakai</th><th>Berakhir</th></tr></thead><tbody>` + rows.map(r => {
+    const total = Number(r.total_units) || 0, used = Number(r.used_units) || 0;
+    const rem = remOf(r);
+    const usedPct = pct(used, total);
+    // red is reserved for truly empty plans; 80%+ is a yellow "menipis" hint
+    let cls = '', label = '';
+    if (total > 0 && rem <= 0) { cls = ' bad'; label = ' · habis'; }
+    else if (usedPct >= 80) { cls = ' warn'; label = ' · menipis'; }
+    return `<tr>
+      <td><b>${esc(r.model || '-')}</b></td>
+      <td><span class="badge${cls}">${esc(r.plan_name || r.plan || '-')}${label}</span></td>
+      <td class="num"${rem <= 0 ? ' style="color:var(--bad)"' : ''}>${fmtN(rem)}</td>
+      <td><div class="bar" style="width:130px"><i class="${cls}" style="width:${usedPct}%"></i></div></td>
+      <td class="dim">${r.ends_at ? when(r.ends_at) : '-'}</td>
+    </tr>`;
+  }).join('') + '</tbody></table></div>';
 }
 
-function renderRequests() {
-  const box = $('#req-list'); if (!box) return;
-  const rows = ((ZB.usage && ZB.usage.recent) || []).slice().reverse();
-  const note = $('#req-note'); if (note) note.textContent = rows.length ? rows.length + ' request tercatat' : 'Kosong';
-  if (!rows.length) {
-    box.innerHTML = '<div class="empty"><b>Belum ada request</b><span class="empty-hint">Riwayat muncul setelah chat lewat bridge.</span></div>';
-    return;
-  }
-  box.innerHTML = '<div class="tablewrap"><table><thead><tr><th>Waktu</th><th>Model</th><th class="num">Token</th><th class="num">t/s</th><th class="num">Status</th></tr></thead><tbody>' +
-    rows.map(r => `<tr><td>${when(r.at)}</td><td>${esc(prettyModel(r.model))}</td><td class="num">${fmtN(r.output_tokens)}</td><td class="num">${fmtTps(r.tps)}</td><td class="num"><span class="badge ok">ok</span></td></tr>`).join('') +
-    '</tbody></table></div>';
+// quotaCardsHTML renders the previous card format: big colored bar, status
+// badge, used/total context, and a colored "sisa" figure.
+function quotaCardsHTML(rows) {
+  const remOf = r => {
+    const t = Number(r.total_units) || 0, u = Number(r.used_units) || 0;
+    return (r.remaining_units !== undefined && r.remaining_units !== null) ? Number(r.remaining_units) : (t - u);
+  };
+  if (!rows.length) return '<div class="empty">Tidak ada data kuota.</div>';
+  return rows.map(r => {
+    const total = Number(r.total_units) || 0, used = Number(r.used_units) || 0;
+    const rem = remOf(r);
+    const usedPct = pct(used, total);
+    let cls = '', label = '';
+    if (total > 0 && rem <= 0) { cls = ' bad'; label = ' · habis'; }
+    else if (usedPct >= 80) { cls = ' warn'; label = ' · menipis'; }
+    return `<div style="margin:12px 0">
+      <div class="row"><b>${esc(r.model || '-')}</b><span class="badge${cls}">${esc(r.plan_name || r.plan || '-')}${label}</span><span class="spacer"></span><span class="small"${rem <= 0 ? ' style="color:var(--bad)"' : ''}>sisa ${fmtN(rem)}</span></div>
+      <div class="bar" style="margin:8px 0;height:12px"><i class="${cls}" style="width:${usedPct}%"></i></div>
+      <div class="row small muted"><span>${fmtN(used)} / ${fmtN(total)} unit</span><span class="spacer"></span><span>${r.ends_at ? ('berakhir ' + when(r.ends_at)) : ''}</span></div>
+    </div>`;
+  }).join('');
 }
 
-/* ---------------- quota ---------------- */
-function pageQuota(view) {
-  view.innerHTML = skeleton('Kuota', 'Sisa grant per akun dan model.', '<button class="btn" id="qu-refresh" type="button">Segarkan</button>') + `
-  <article class="card">
-    <div class="card-head">
-      <div><h2>Tekanan kuota</h2><p class="section-note" id="qu-note">Membaca kuota…</p></div>
-      <div class="tabs" id="qu-tabs" role="tablist" aria-label="Akun"></div>
-    </div>
-    <div id="qu-list"><div class="empty">Membaca kuota…</div></div>
-  </article>`;
-  $('#qu-refresh').onclick = () => { loadQuota(true); toast('Kuota disegarkan', 'ok'); };
-  renderQuota();
-  loadQuota();
-}
-
-async function loadQuota(force) {
-  const jobs = [api('/v1/quota')];
-  if (force || !ZB.pool) jobs.push(api('/v1/accounts/pool'));
-  try {
-    const [q, p] = await Promise.all(jobs);
+// renderQuotaInto loads /v1/quota and paints the table into `box`, also
+// refreshing the dashboard "Sisa kuota" tile and status banner.
+function renderQuotaInto(box, cards) {
+  return api('/v1/quota').then(q => {
     ZB.quota = q;
-    if (p) ZB.pool = p;
-  } catch (e) {
-    const box = $('#qu-list');
-    if (box) box.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
-    return;
-  }
-  renderQuota();
+    overviewBanner();
+    if (box) box.innerHTML = cards ? quotaCardsHTML(q.rows || []) : quotaTableHTML(q.rows || []);
+    const rows = q.rows || [];
+    const remOf = r => {
+      const t = Number(r.total_units) || 0, u = Number(r.used_units) || 0;
+      return (r.remaining_units !== undefined && r.remaining_units !== null) ? Number(r.remaining_units) : (t - u);
+    };
+    const aliveRows = rows.filter(r => Number(r.total_units) > 0 && remOf(r) > 0);
+    const sisa = aliveRows.reduce((s, r) => s + remOf(r), 0);
+    const sisaEl = $('#ov-sisa');
+    if (sisaEl) sisaEl.textContent = aliveRows.length ? fmtN(sisa) : '0';
+    const sisaSub = $('#ov-sisasub');
+    if (sisaSub) sisaSub.textContent = aliveRows.length ? (aliveRows[0].model || '') + ' · ' + aliveRows.length + ' plan' : 'tidak ada plan hidup';
+  }).catch(e => {
+    ZB.quota = null;
+    overviewBanner();
+    if (box) box.innerHTML = `<div class="empty">${esc(friendlyError(e.message))}</div>`;
+  });
 }
 
-function quotaGroups() {
-  const q = ZB.quota || {};
-  const accounts = (ZB.pool && ZB.pool.accounts) || [];
-  if (accounts.length) {
-    return accounts.map(a => ({
-      id: a.id,
-      label: a.label || a.id,
-      active: !!(a.active || a.default),
-      error: a.error,
-      rows: (a.rows || []).map(r => ({ ...r, source: 'pool' })),
-    }));
-  }
-  return [{ id: q.account || 'akun', label: q.account || 'akun', active: true, rows: q.rows || [], error: q.errors && q.errors[0] }];
-}
+async function loadOverviewExtras() {
+  renderQuotaInto(null);
 
-function renderQuota() {
-  const box = $('#qu-list'); if (!box) return;
-  const q = ZB.quota;
-  if (!q) { box.innerHTML = '<div class="empty">Membaca kuota…</div>'; return; }
-  const groups = quotaGroups();
-  const tabs = $('#qu-tabs');
-  if (ZB.quotaTab == null || ZB.quotaTab >= groups.length) ZB.quotaTab = Math.max(0, groups.findIndex(g => g.active));
-  if (ZB.quotaTab < 0) ZB.quotaTab = 0;
-  if (tabs) {
-    tabs.innerHTML = groups.map((g, i) => `<button type="button" role="tab" aria-selected="${i === ZB.quotaTab}" class="${i === ZB.quotaTab ? 'on' : ''}" data-qi="${i}">${esc(g.label)}</button>`).join('');
-    tabs.querySelectorAll('button[data-qi]').forEach(b => b.onclick = () => { ZB.quotaTab = Number(b.dataset.qi); renderQuota(); });
-  }
-  const g = groups[ZB.quotaTab];
-  const note = $('#qu-note');
-  if (note) note.textContent = `${g.label} · ${q.source || 'tidak diketahui'}${g.error ? ' · ' + g.error : ''}`;
-  if (!g.rows.length) {
-    const why = g.error || (q.errors && q.errors[0]) || 'Tidak ada grant untuk akun ini.';
-    box.innerHTML = `<div class="empty"><b>Belum ada grant</b><span class="empty-hint">${esc(why)}</span></div>`;
-    return;
-  }
-  box.innerHTML = '<div class="ring-grid">' + g.rows.map(r => {
-    const total = Number(r.total_units ?? r.total) || 0, used = Number(r.used_units ?? r.used) || 0;
-    const rem = r.remaining_units != null ? Number(r.remaining_units) : (r.remaining != null ? Number(r.remaining) : total - used);
-    const p = total > 0 ? Math.min(100, Math.max(0, used / total * 100)) : 0;
-    return `<article class="ring-card">
-      <div class="ring-wrap" aria-hidden="true">
-        ${ringSvg(p)}
-        <span class="ring-pct">${Math.round(p)}%</span>
-      </div>
-      <div class="ring-main">
-        <h3>${esc(prettyModel(r.model || r.plan_name || 'plan'))}</h3>
-        <p><b>${fmtN(rem)}</b> sisa / ${fmtN(total)}</p>
-        <span class="section-note">${fmtN(used)} terpakai</span>
-      </div>
-    </article>`;
-  }).join('') + '</div>';
-}
-
-function ringSvg(p) {
-  const r = 32, c = 2 * Math.PI * r;
-  const off = c * (1 - p / 100);
-  return `<svg viewBox="0 0 80 80"><circle class="ring-track" cx="40" cy="40" r="${r}"/><circle class="ring-fill" cx="40" cy="40" r="${r}" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 40 40)"/></svg>`;
-}
-
-/* ---------------- lane ---------------- */
-function pageLane(view) {
-  view.innerHTML = skeleton('Lane', 'Identitas yang dipakai tiap request upstream.', '<button class="btn" id="ln-refresh" type="button">Segarkan</button>') + `
-  <div class="stat-grid">
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.pulse}</span><span class="stat-label">Status</span></div><div class="stat-value" id="ln-state">-</div><div class="stat-note">koneksi upstream</div></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.check}</span><span class="stat-label">Akun siap</span></div><div class="stat-value" id="ln-accounts">-</div><div class="stat-note">di ring akun</div></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.hash}</span><span class="stat-label">Token plan</span></div><div class="stat-value" id="ln-jwt">-</div><div class="stat-note">JWT tersedia</div></article>
-  </div>
-  <article class="card">
-    <div class="card-head"><h2>Info lane</h2></div>
-    <dl class="lane-facts">
-      <div><dt>Lane</dt><dd id="ln-lane">-</dd></div>
-      <div><dt>Upstream</dt><dd id="ln-up" class="mono">-</dd></div>
-      <div><dt>Versi app</dt><dd id="ln-ver">-</dd></div>
-      <div><dt>Device MID</dt><dd id="ln-mid" class="mono">-</dd></div>
-      <div><dt>Autentikasi</dt><dd id="ln-auth">-</dd></div>
-      <div><dt>Mode</dt><dd id="ln-mode">-</dd></div>
-    </dl>
-  </article>`;
-  $('#ln-refresh').onclick = async () => { await refreshHealth(); renderLane(); toast('Lane disegarkan', 'ok'); };
-  renderLane();
-}
-
-function renderLane() {
-  const h = ZB.health || {};
-  const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-  if (!document.getElementById('ln-lane')) return;
-  set('ln-lane', h.lane || '-');
-  set('ln-up', h.upstream || '-');
-  set('ln-ver', h.version || '-');
-  set('ln-mid', h.deviceMid || '-');
-  set('ln-auth', h.auth || '-');
-  set('ln-mode', h.live === false ? 'offline' : 'aktif');
-  set('ln-accounts', fmtN((h.accounts || []).length));
-  set('ln-jwt', h.planJwt && h.planJwt.present ? 'ada' : 'tidak');
-  const st = document.getElementById('ln-state');
-  if (st) {
-    st.textContent = h.live === false ? 'offline' : 'aktif';
-    st.classList.toggle('bad', h.live === false);
-  }
+  api('/v1/claim').then(c => {
+    const el = $('#ov-claim'); if (!el) return;
+    const plans = c.plans || c.candidates || [];
+    el.innerHTML =
+      (plans.length ? `<div class="tablewrap"><table><thead><tr><th>Plan</th><th>Prioritas</th><th>Mulai</th><th>Selesai</th><th></th></tr></thead><tbody>` +
+        plans.slice(0, 4).map(p => `<tr><td>${esc(p.name || p.plan || p.id || 'plan')}</td><td class="num">${Number(p.priority) || 0}</td><td>${when(p.starts_at || p.start)}</td><td>${when(p.ends_at || p.end)}</td><td><a class="btn ghost sm" href="#/claim">Klaim</a></td></tr>`).join('') + '</tbody></table></div>'
+        : `<div class="empty">${esc(c.message || 'Tidak ada plan yang bisa diklaim.')}</div>`) +
+      (plans.length ? `<div class="row" style="margin-top:10px"><a class="btn ghost sm" href="#/claim">Buka halaman klaim</a></div>` : '');
+  }).catch(async () => {
+    // Distinguish "your setup is incomplete" from "the upstream service is
+    // down" — blaming the user's setup for a 502 erodes trust. The claim
+    // rejection can land before /health has filled ZB.health, so fetch it
+    // on demand instead of trusting the race.
+    const el = $('#ov-claim'); if (!el) return;
+    let h = ZB.health;
+    if (!h || !h.planJwt) {
+      try { h = ZB.health = await api('/health'); } catch (e) { h = null; }
+    }
+    const hasJwt = !!(h && h.planJwt && h.planJwt.present);
+    el.innerHTML = '<div class="empty">' + esc(hasJwt
+      ? tr('Layanan klaim sedang tidak bisa dihubungi. Coba lagi nanti — bukan karena setup-mu.')
+      : tr('Butuh akun Z.ai terhubung dulu — buka halaman Akun.')) + '</div>';
+  });
 }
 
 /* ---------------- usage ---------------- */
 function pageUsage(view) {
-  view.innerHTML = skeleton('Penggunaan', 'Token, kecepatan, dan tren per model.', '<button class="btn" id="urefresh" type="button">Muat ulang</button>') + `
-  <div class="stat-grid">
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.gauge}</span><span class="stat-label">Terakhir</span></div><p class="stat-value" id="ur-last">-</p><p class="stat-note">token per detik</p></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.pulse}</span><span class="stat-label">Tertinggi</span></div><p class="stat-value" id="ur-high">-</p><p class="stat-note">puncak jendela</p></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.clock}</span><span class="stat-label">Rata-rata 7 hari</span></div><p class="stat-value" id="ur-avg">-</p><p class="stat-note">token per detik</p></article>
-  </div>
-  <div class="grid g2 mt14">
-    <article class="card"><div class="card-head"><div><h2>Hari ini</h2><p class="section-note">volume sejak proses hidup</p></div></div><div class="grid g2" id="u-today"></div></article>
-    <article class="card"><div class="card-head"><div><h2>Sepanjang waktu</h2><p class="section-note">akumulasi harian</p></div></div><div class="grid g2" id="u-all"></div></article>
-  </div>
-  <article class="card mt14">
-    <div class="card-head">
-      <div><h2>Kecepatan</h2><p class="section-note" id="u-range-label">1h</p></div>
-      <div class="tabs" id="urange" role="tablist" aria-label="Rentang waktu">
-        ${['1h', '6h', '24h', '7d'].map(r => `<button type="button" role="tab" data-r="${r}" class="${ZB.range === r ? 'on' : ''}">${r === '7d' ? '7 hari' : r}</button>`).join('')}
-      </div>
+  view.innerHTML = skeleton('Penggunaan', 'Token, kecepatan, dan tren per model.') + `
+  <div class="sec"><h2>Kuota plan</h2><div class="card" id="u-quota"><div class="empty">Memuat kuota…</div></div></div>
+  <div class="toolbar" style="margin-top:16px">
+    <div class="tabs" id="urange" style="border:0;margin:0">
+      ${['1h', '6h', '24h', '7d'].map(r => `<button type="button" data-r="${r}" class="${ZB.range === r ? 'active' : ''}">${r === '7d' ? '7 hari' : r}</button>`).join('')}
     </div>
-    <div class="chartbox"><svg class="chart" id="uchart" preserveAspectRatio="none"></svg><div class="chart-tip" id="uchart-tip" hidden></div></div>
-    <div class="legend"><span><i class="tps"></i>t/s</span><span><i class="out"></i>token keluar</span></div>
-  </article>
-  <div class="grid g2 mt14">
-    <article class="card"><div class="card-head"><div><h2>Per model</h2><p class="section-note">porsi request hari ini</p></div></div><div id="umodels"></div></article>
-    <article class="card"><div class="card-head"><div><h2>Aplikasi ZCode</h2><p class="section-note" id="udnote"></p></div></div><div id="udesktop"></div></article>
+    <span class="spacer"></span>
+    <button class="btn ghost sm" id="urefresh" type="button">Muat ulang</button>
+  </div>
+  <div class="ringgrid">
+    <div class="ring"><div class="k">Terakhir</div><div class="v" id="ur-last">-</div></div>
+    <div class="ring"><div class="k">Tertinggi</div><div class="v" id="ur-high">-</div></div>
+    <div class="ring"><div class="k">Rata-rata 7 hari</div><div class="v" id="ur-avg">-</div></div>
+  </div>
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card"><h2>Hari ini</h2><div class="grid g2" id="u-today"></div></div>
+    <div class="card"><h2>Sepanjang waktu</h2><div class="grid g2" id="u-all"></div></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h2>Kecepatan <span class="muted" id="u-range-label"></span></h2>
+    <div class="chartbox"><svg class="chart" id="uchart" preserveAspectRatio="none"></svg></div>
+    <div class="legend"><span><i style="background:var(--accent)"></i>t/s</span><span><i style="background:var(--muted)"></i>token keluar</span></div>
+  </div>
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card"><h2>Per model <span class="muted">hari ini</span></h2><div id="umodels"></div></div>
+    <div class="card"><h2>Aplikasi ZCode <span class="muted" id="udnote"></span></h2><div id="udesktop"></div></div>
   </div>`;
   $('#urange').onclick = e => {
     const b = e.target.closest('button[data-r]'); if (!b) return;
     ZB.range = b.dataset.r;
-    $$('#urange button').forEach(x => x.classList.toggle('on', x === b));
+    $$('#urange button').forEach(x => x.classList.toggle('active', x === b));
     drawUsageChart();
   };
-  $('#urefresh').onclick = () => loadUsage(true);
-  bindUsageChart();
+  $('#urefresh').onclick = () => { renderQuotaInto($('#u-quota'), true); loadUsage(true); };
+  renderQuotaInto($('#u-quota'), true);
   renderUsage();
-}
-
-function bindUsageChart() {
-  const svg = $('#uchart'), tip = $('#uchart-tip');
-  if (!svg || svg.dataset.hover) return;
-  svg.dataset.hover = '1';
-  const hide = () => {
-    if (tip) tip.hidden = true;
-    const g = svg.querySelector('#uchart-hover');
-    if (g) g.setAttribute('hidden', '');
-  };
-  svg.addEventListener('mousemove', e => {
-    const pts = ZB.chartPts || [];
-    if (!pts.length || !tip) return;
-    const W = 640, H = 180;
-    const rect = svg.getBoundingClientRect();
-    const vx = (e.clientX - rect.left) / rect.width * W;
-    let best = null, bd = Infinity;
-    pts.forEach(p => { const d = Math.abs(p.x - vx); if (d < bd) { bd = d; best = p; } });
-    if (!best || bd > 36) { hide(); return; }
-    const g = svg.querySelector('#uchart-hover');
-    if (g) {
-      g.removeAttribute('hidden');
-      g.innerHTML = `<line class="chart-hover-line" x1="${best.x.toFixed(1)}" y1="12" x2="${best.x.toFixed(1)}" y2="${H - 14}"/><circle cx="${best.x.toFixed(1)}" cy="${best.y.toFixed(1)}" r="5" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
-    }
-    tip.hidden = false;
-    tip.innerHTML = `<b>${fmtTps(best.tps)} t/s</b><span>${esc(prettyModel(best.model || 'request'))} · ${fmtN(best.tokens)} token</span><span>${when(best.at)}</span>`;
-    const px = best.x / W * rect.width;
-    const py = best.y / H * rect.height;
-    tip.style.left = Math.max(76, Math.min(rect.width - 76, px)) + 'px';
-    tip.style.top = Math.max(64, py - 10) + 'px';
-  });
-  svg.addEventListener('mouseleave', hide);
 }
 
 async function loadUsage(force) {
@@ -1310,7 +1046,7 @@ function renderUsage() {
   if (!u) return;
   const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
   set('ur-last', fmtTps(u.rings.last_tps) + ' <small>t/s</small>');
-  set('ur-high', fmtN(u.rings.high_tps) + ' <small>t/s</small>');
+  set('ur-high', fmtTps(u.rings.high_tps) + ' <small>t/s</small>');
   set('ur-avg', fmtTps(u.rings.seven_day_avg_tps) + ' <small>t/s</small>');
   const statBlocks = st => `
     <div class="stat"><span class="k">Request</span><span class="v">${fmtN(st.requests)}</span></div>
@@ -1323,18 +1059,7 @@ function renderUsage() {
   set('u-all', statBlocks(u.all_time || {}));
   const pm = (u.today && u.today.per_model) || {};
   const models = Object.entries(pm).sort((a, b) => b[1].requests - a[1].requests);
-  const totalReq = models.reduce((s, [, x]) => s + (x.requests || 0), 0) || 1;
-  set('umodels', models.length ? '<div class="ring-grid">' + models.map(([m, s]) => {
-    const p = Math.min(100, Math.max(0, (s.requests || 0) / totalReq * 100));
-    return `<article class="ring-card">
-      <div class="ring-wrap" aria-hidden="true">${ringSvg(p)}<span class="ring-pct">${p < 10 ? p.toFixed(1) : Math.round(p)}%</span></div>
-      <div class="ring-main">
-        <h3>${esc(prettyModel(m))}</h3>
-        <p><b>${fmtN(s.requests)}</b> request</p>
-        <span class="section-note">${fmtN(s.output_tokens)} token · ${fmtTps(s.avg_tps)} t/s</span>
-      </div>
-    </article>`;
-  }).join('') + '</div>' : '<div class="empty">Belum ada request hari ini.</div>');
+  set('umodels', models.length ? `<div class="tablewrap"><table><thead><tr><th>Model</th><th class="num">Req</th><th class="num">Keluar</th><th class="num">t/s</th></tr></thead><tbody>${models.map(([m, s]) => `<tr><td>${esc(m)}</td><td class="num">${fmtN(s.requests)}</td><td class="num">${fmtN(s.output_tokens)}</td><td class="num">${fmtTps(s.avg_tps)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Belum ada request hari ini.</div>');
   drawUsageChart();
   renderDesktop(u.desktop);
 }
@@ -1343,16 +1068,13 @@ function drawUsageChart() {
   const u = ZB.usage; if (!u) return;
   const svg = document.getElementById('uchart'); if (!svg) return;
   const label = document.getElementById('u-range-label');
-  if (label) label.textContent = ZB.range;
-  const tip = document.getElementById('uchart-tip');
+  if (label) label.textContent = '· ' + ZB.range;
   const now = Date.now();
   const span = { '1h': 36e5, '6h': 216e5, '24h': 864e5, '7d': 6048e5 }[ZB.range] || 864e5;
   const rows = (u.recent || []).filter(r => now - new Date(r.at).getTime() <= span);
-  const W = 640, H = 180, padL = 42, padR = 10, padT = 12, padB = 14;
-  ZB.chartPts = [];
-  if (tip) tip.hidden = true;
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const W = 640, H = 180, pad = 8;
   if (!rows.length) {
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="var(--muted)" font-size="12">Belum ada request pada rentang ini</text>`;
     return;
   }
@@ -1360,35 +1082,16 @@ function drawUsageChart() {
   rows.forEach(r => { maxTps = Math.max(maxTps, r.tps || 0); maxTok = Math.max(maxTok, r.output_tokens || 0); });
   const t0 = Math.min(...rows.map(r => new Date(r.at).getTime()));
   const t1 = Math.max(...rows.map(r => new Date(r.at).getTime()), t0 + 1);
-  const x = t => padL + (W - padL - padR) * ((t - t0) / (t1 - t0 || 1));
-  const yTps = v => H - padB - (H - padB - padT) * ((v || 0) / maxTps);
-  const yTok = v => H - padB - (H - padB - padT) * ((v || 0) / maxTok);
+  const x = t => pad + (W - pad * 2) * ((t - t0) / (t1 - t0 || 1));
+  const yTps = v => H - pad - (H - pad * 2) * ((v || 0) / maxTps);
+  const yTok = v => H - pad - (H - pad * 2) * ((v || 0) / maxTok);
   const tpsPts = rows.map(r => `${x(new Date(r.at).getTime()).toFixed(1)},${yTps(r.tps).toFixed(1)}`).join(' ');
   const tokPts = rows.map(r => `${x(new Date(r.at).getTime()).toFixed(1)},${yTok(r.output_tokens).toFixed(1)}`).join(' ');
-  const areaPts = `${x(t0).toFixed(1)},${H - padB} ${tpsPts} ${x(t1).toFixed(1)},${H - padB}`;
-  let grid = '';
-  for (let i = 0; i <= 4; i++) {
-    const val = maxTps * i / 4;
-    const yy = yTps(val);
-    grid += `<line class="chart-grid" x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}"/>` +
-      `<text class="chart-axis" x="${padL - 6}" y="${yy.toFixed(1)}" text-anchor="end" dominant-baseline="middle">${Math.round(val)}</text>`;
-  }
-  const last = rows[rows.length - 1];
-  const lx = x(new Date(last.at).getTime()), ly = yTps(last.tps);
-  svg.innerHTML = `<defs><linearGradient id="uarea" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.22"/>
-      <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
-    </linearGradient></defs>` +
-    grid +
-    `<polygon points="${areaPts}" fill="url(#uarea)"/>` +
-    `<polyline points="${tokPts}" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-dasharray="3 3" opacity=".7"/>` +
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = `<polyline points="${tokPts}" fill="none" stroke="var(--muted)" stroke-width="1.4" stroke-dasharray="3 3" opacity=".7"/>` +
     `<polyline points="${tpsPts}" fill="none" stroke="var(--accent)" stroke-width="2.2" stroke-linejoin="round"/>` +
-    `<circle class="chart-live" cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="4" fill="var(--accent)"/>` +
-    `<g id="uchart-hover" hidden></g>`;
-  ZB.chartPts = rows.map(r => ({
-    at: r.at, model: r.model, tps: r.tps, tokens: r.output_tokens,
-    x: x(new Date(r.at).getTime()), y: yTps(r.tps),
-  }));
+    rows.map(r => `<circle cx="${x(new Date(r.at).getTime())}" cy="${yTps(r.tps)}" r="1.8" fill="var(--accent)"><title>${esc(r.model)} · ${fmtTps(r.tps)} t/s · ${fmtN(r.output_tokens)} token</title></circle>`).join('') +
+    `<text x="${pad}" y="12" fill="var(--muted)" font-size="10">${fmtTps(maxTps)} t/s</text>`;
 }
 
 function renderDesktop(d) {
@@ -1408,7 +1111,7 @@ function renderDesktop(d) {
     <div class="stat"><span class="k">Puncak 7h</span><span class="v">${fmtTps(s.high_7d)} t/s</span></div>
     <div class="stat"><span class="k">Sesi</span><span class="v">${fmtN(s.sessions)}</span></div>
     <div class="stat"><span class="k">Aktivitas</span><span class="v smallv">${when(s.last_activity ? s.last_activity * 1000 : 0)}</span></div>
-  </div><p class="small muted u-path">${esc(d.path || '')}</p>`;
+  </div><p class="small muted" style="margin:10px 0 0">${esc(d.path || '')}</p>`;
 }
 
 /* ---------------- inspector ---------------- */
@@ -1418,13 +1121,13 @@ function pageInspector(view) {
   view.innerHTML = skeleton('Inspector', 'Rekaman request/response lokal, replay, dan ekspor HAR.') + `
   <div class="toolbar">
     <input class="grow" id="iq" placeholder="Cari model, path, akun…" value="${esc(insState.q)}">
-    <select id="imethod"><option value="">Semua metode</option>${['GET', 'POST'].map(m => `<option>${m}</option>`).join('')}</select>
+    <select id="imethod"><option value="">Semua metode</option>${['GET', 'POST', 'DELETE'].map(m => `<option>${m}</option>`).join('')}</select>
     <select id="istatus"><option value="">Semua status</option><option value="ok">2xx</option><option value="err">non-2xx</option></select>
     <button class="btn ghost sm" id="irefresh" type="button">Muat ulang</button>
     <a class="btn ghost sm" id="ihar" href="/inspect?format=har" target="_blank" rel="noopener">Ekspor HAR</a>
   </div>
   <div class="split">
-    <div class="card flat flat-card"><div class="tablewrap table-tall"><table id="itable"><thead><tr><th>Waktu</th><th>Metode</th><th>Rute</th><th>Model</th><th class="num">Status</th><th class="num">Durasi</th></tr></thead><tbody><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table></div></div>
+    <div class="card flat" style="padding:0"><div class="tablewrap" style="max-height:64vh"><table id="itable"><thead><tr><th>Waktu</th><th>Metode</th><th>Rute</th><th>Model</th><th class="num">Status</th><th class="num">Durasi</th></tr></thead><tbody><tr><td colspan="6" class="empty">Memuat…</td></tr></tbody></table></div></div>
     <div class="card" id="idetail"><div class="empty">Pilih satu baris untuk melihat detail.</div></div>
   </div>`;
   $('#iq').oninput = e => { insState.q = e.target.value; renderInspectRows(); };
@@ -1491,9 +1194,11 @@ async function loadInspectDetail(id) {
         <dt>Ukuran</dt><dd>${fmtBytes(ex.request_bytes)} → ${fmtBytes(ex.response_bytes)}${ex.truncated ? ' (dipotong)' : ''}</dd>
         <dt>Stream</dt><dd>${ex.stream ? 'ya' : 'tidak'}</dd>
       </dl>
-      <h3 class="detail-h">Request</h3><pre class="body">${esc(ex.request_body || '')}</pre>
+      <h3 style="margin-top:12px">Request</h3><pre class="body">${esc(ex.request_body || '')}</pre>
       <h3>Response</h3><pre class="body">${esc(ex.response_body || '')}</pre>`;
     $('#ireplay').onclick = async () => {
+      // Replays call the plan lane again — that consumes real quota, so confirm.
+      if (!confirm('Putar ulang request ini? Request dikirim lagi ke ZCode dan memakai kuota plan.')) return;
       try { await api('/inspect/replay', { method: 'POST', body: JSON.stringify({ id: ex.id }) }); toast('Replay terkirim', 'ok'); }
       catch (e) { toast(e.message, 'bad'); }
     };
@@ -1504,124 +1209,154 @@ async function loadInspectDetail(id) {
   } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
-/* ---------------- claim ---------------- */
-function pageClaim(view) {
-  view.innerHTML = skeleton('Klaim plan', 'Cek plan weekend/trial yang tersedia lalu klaim.') + `
-  <div class="toolbar"><button class="btn" id="cscan" type="button">Cek plan</button><button class="btn primary" id="cnow" type="button">Klaim sekarang</button><button class="btn" id="call" type="button">Klaim semua akun</button><span class="small muted" id="cstat"></span></div>
-  <div class="stat-grid">
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.list}</span><span class="stat-label">Plan terdeteksi</span></div><p class="stat-value" id="csum-plans">–</p><p class="stat-note">dari pemindaian terakhir</p></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.clock}</span><span class="stat-label">Pemindaian terakhir</span></div><p class="stat-value" id="csum-scan">–</p><p class="stat-note">waktu lokal</p></article>
-    <article class="stat-card"><div class="stat-top"><span class="stat-icon" aria-hidden="true">${ICON.check}</span><span class="stat-label">Riwayat klaim</span></div><p class="stat-value" id="csum-hist">–</p><p class="stat-note">percobaan tersimpan</p></article>
-  </div>
-  <div class="card mt14" id="cbody"><div class="empty"><b>Belum ada plan aktif</b><span class="empty-hint">Tekan “Cek plan” untuk memindai penawaran weekend/trial.</span></div></div>
-  <div class="card mt14"><h2>Riwayat klaim</h2><div id="chist"><div class="empty">Memuat…</div></div></div>`;
-  $('#cscan').onclick = () => scanClaim();
-  $('#cnow').onclick = () => claimNow();
-  $('#call').onclick = () => claimAll();
-  scanClaim();
+/* ---------------- network ---------------- */
+function pageNetwork(view) {
+  view.innerHTML = skeleton('Jaringan', 'Lalu lintas adapter, koneksi TCP, dan proses ZCode.') + `
+  <div class="grid g4" id="ntiles"></div>
+  <div class="grid g2" style="margin-top:14px">
+    <div class="card"><h2>Adapter</h2><div id="nifs"></div></div>
+    <div class="card"><h2>Proses ZCode</h2><div id="nproc"></div></div>
+  </div>`;
+  renderNetwork();
 }
 
-const CLAIM_CAPTCHA_SDK = 'https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
-let claimCaptchaScript = null;
+function renderNetwork() {
+  const n = ZB.net;
+  const tiles = document.getElementById('ntiles');
+  if (!tiles) return;
+  if (!n) { tiles.innerHTML = '<div class="card empty">Menunggu sampel jaringan…</div>'; return; }
+  tiles.innerHTML = `
+    <div class="card stat"><span class="k">Unduh</span><span class="v">${fmtBps(n.total_in_bps)}</span><span class="s">semua adapter</span></div>
+    <div class="card stat"><span class="k">Unggah</span><span class="v">${fmtBps(n.total_out_bps)}</span><span class="s">semua adapter</span></div>
+    <div class="card stat"><span class="k">TCP</span><span class="v">${n.tcp_connections || 0}</span><span class="s">${n.tcp_established || 0} established</span></div>
+    <div class="card stat"><span class="k">Status</span><span class="v smallv">${n.supported ? 'aktif' : 'tidak didukung'}</span><span class="s">${esc(n.error || 'sampler lokal')}</span></div>`;
+  const ifs = (n.interfaces || []).slice().sort((a, b) => (b.in_bps + b.out_bps) - (a.in_bps + a.out_bps));
+  document.getElementById('nifs').innerHTML = ifs.length ? `<div class="tablewrap"><table><thead><tr><th>Adapter</th><th class="num">Turun</th><th class="num">Naik</th><th class="num">Total</th></tr></thead><tbody>${ifs.map(i => `<tr><td>${esc(i.description || i.name)} ${i.up ? '<span class="badge ok">up</span>' : '<span class="badge bad">down</span>'}</td><td class="num">${fmtBps(i.in_bps)}</td><td class="num">${fmtBps(i.out_bps)}</td><td class="num">${fmtBytes(i.in_bytes + i.out_bytes)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Tidak ada adapter.</div>';
+  const p = n.process;
+  document.getElementById('nproc').innerHTML = p && p.found ? `<div class="grid g2">
+      <div class="stat"><span class="k">Baca</span><span class="v">${fmtBps(p.read_bps)}</span><span class="s">${fmtBytes(p.read_bytes)}</span></div>
+      <div class="stat"><span class="k">Tulis</span><span class="v">${fmtBps(p.write_bps)}</span><span class="s">${fmtBytes(p.write_bytes)}</span></div>
+      <div class="stat"><span class="k">CPU</span><span class="v">${(p.cpu_percent || 0).toFixed(1)}%</span></div>
+      <div class="stat"><span class="k">PID</span><span class="v smallv">${(p.pids || []).join(', ') || '-'}</span><span class="s">${esc(p.name || '')}</span></div>
+    </div><p class="small muted" style="margin-top:10px">Kalibrasi ${(p.calibration || 1).toFixed(2)}×</p>`
+    : '<div class="empty">Proses ZCode tidak ditemukan.</div>';
+}
 
-function loadClaimCaptchaSdk() {
-  if (claimCaptchaScript) return claimCaptchaScript;
-  claimCaptchaScript = new Promise((resolve, reject) => {
-    if (window.initAliyunCaptcha) { resolve(); return; }
+/* ---------------- claim ---------------- */
+const CLAIM = { widget: null };
+
+// loadAliyunSDK injects the official Aliyun captcha 2.0 SDK once.
+function loadAliyunSDK() {
+  if (window.initAliyunCaptcha) return Promise.resolve();
+  if (CLAIM.sdkPromise) return CLAIM.sdkPromise;
+  CLAIM.sdkPromise = new Promise((res, rej) => {
     const s = document.createElement('script');
-    s.src = CLAIM_CAPTCHA_SDK;
-    s.async = true;
-    s.onload = () => resolve();
-    s.onerror = () => {
-      claimCaptchaScript = null;
-      reject(new Error(ZB.lang === 'en' ? 'Captcha SDK failed to load' : 'Gagal memuat SDK captcha'));
-    };
+    s.src = 'https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js';
+    s.onload = () => res();
+    s.onerror = () => { CLAIM.sdkPromise = null; rej(new Error('Gagal memuat SDK captcha Aliyun (butuh internet).')); };
     document.head.appendChild(s);
   });
-  return claimCaptchaScript;
+  return CLAIM.sdkPromise;
 }
 
-function solveClaimCaptcha() {
-  return api('/v1/claim/verification-config').then(cfgRes => {
-    const cfg = cfgRes.config || {};
-    if (!cfg.enabled || !cfg.region || !cfg.prefix || !cfg.scene_id) {
-      throw new Error(ZB.lang === 'en' ? 'Claim needs captcha: open the ZCode app and press Claim' : 'Klaim butuh captcha: buka app ZCode lalu tekan Claim');
+// doClaim POSTs the claim; on captcha gate (3007) it boots the widget and
+// retries with the verify param — the same flow the upstream dashboard runs.
+async function doClaim(planID) {
+  const st = $('#cstat');
+  const post = body => api('/v1/claim', { method: 'POST', body: JSON.stringify(body) });
+  try {
+    if (st) st.textContent = 'mengirim klaim…';
+    let r;
+    try {
+      r = await post(planID ? { plan_id: planID } : {});
+    } catch (e) {
+      const raw = String(e.message || '');
+      const gated = /3007|captcha/i.test(raw);
+      if (!gated) throw e;
+      // captcha required — boot the widget, wait for the human to solve it
+      if (st) st.textContent = 'perlu verifikasi captcha — selesaikan slider di bawah';
+      const param = await runCaptchaWidget();
+      if (st) st.textContent = 'mengirim ulang dengan verifikasi…';
+      r = await post(planID ? { plan_id: planID, captcha_param: param.param, captcha_region: param.region } : { captcha_param: param.param, captcha_region: param.region });
     }
-    return loadClaimCaptchaSdk().then(() => new Promise((resolve, reject) => {
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)';
-      wrap.innerHTML = '<div style="background:var(--panel,#12161c);color:var(--fg,#e6edf3);border:1px solid var(--line,#2a3038);border-radius:14px;padding:20px 22px;max-width:360px;text-align:center">' +
-        '<div style="font-weight:600;margin-bottom:6px">' + (ZB.lang === 'en' ? 'Security check' : 'Verifikasi keamanan') + '</div>' +
-        '<p class="small muted" style="margin:0 0 14px">' + (ZB.lang === 'en' ? 'Solve the captcha to claim this plan.' : 'Selesaikan captcha untuk mengklaim plan ini.') + '</p>' +
-        '<div id="zbCaptcha"></div>' +
-        '<button id="zbCaptchaBtn" class="btn primary" type="button">' + (ZB.lang === 'en' ? 'Verify' : 'Verifikasi') + '</button> ' +
-        '<button id="zbCaptchaCancel" class="btn ghost" type="button">' + (ZB.lang === 'en' ? 'Cancel' : 'Batal') + '</button>' +
-        '</div>';
-      document.body.appendChild(wrap);
-      const done = v => { wrap.remove(); resolve({ param: v, region: cfg.region }); };
-      const fail = e => { wrap.remove(); reject(new Error(typeof e === 'string' && e ? e : (ZB.lang === 'en' ? 'Captcha failed' : 'Captcha gagal'))); };
-      wrap.querySelector('#zbCaptchaCancel').onclick = () => fail('');
-      try {
-        window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix };
-        window.initAliyunCaptcha({
-          SceneId: cfg.scene_id,
-          region: cfg.region,
-          prefix: cfg.prefix,
-          mode: 'popup',
-          language: ZB.lang === 'en' ? 'en' : 'cn',
-          showErrorTip: true,
-          element: '#zbCaptcha',
-          button: '#zbCaptchaBtn',
-          getInstance: inst => { try { if (inst && typeof inst.show === 'function') inst.show(); } catch (_) {} },
-          success: param => { const p = typeof param === 'string' ? param.trim() : ''; p ? done(p) : fail(''); },
-          fail: fail,
-        });
-      } catch (e) {
-        fail(e && e.message);
-      }
-    }));
+    if (st) st.textContent = '';
+    toast(r.message || 'Plan berhasil diklaim', 'ok');
+    if (CLAIM.widget) { try { CLAIM.widget.reset && CLAIM.widget.reset(); } catch (_) {} }
+    scanClaim();
+    return r;
+  } catch (e) {
+    if (st) st.textContent = '';
+    toast(e.message, 'bad');
+    return null;
+  }
+}
+
+// runCaptchaWidget fetches the upstream verification config, renders the
+// slider, and resolves with {param, region} once the human passes it.
+function runCaptchaWidget() {
+  return new Promise(async (resolve, reject) => {
+    const box = $('#ccaptcha');
+    try {
+      const cfg = await api('/v1/claim/verification-config');
+      const c = (cfg && cfg.config) || {};
+      if (!c.enabled || !c.region || !c.prefix || !c.scene_id) throw new Error(tr('Server tidak mengirim konfigurasi captcha — klaim lewat aplikasi ZCode desktop.'));
+      await loadAliyunSDK();
+      box.innerHTML = '<div class="captcha-lead">' + esc(tr('Geser slider untuk verifikasi, klaim lanjut otomatis.')) + '</div><div id="aliyun-captcha-box"></div>';
+      box.hidden = false;
+      box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      window.AliyunCaptchaConfig = { region: c.region, prefix: c.prefix };
+      let settled = false;
+      window.initAliyunCaptcha({
+        SceneId: c.scene_id,
+        region: c.region,
+        prefix: c.prefix,
+        mode: 'embed',
+        element: '#aliyun-captcha-box',
+        button: '#aliyun-captcha-box',
+        language: ZB.lang === 'en' ? 'en' : 'id',
+        getInstance: inst => { CLAIM.widget = inst; },
+        success: sel => {
+          if (settled) return; settled = true;
+          // the SDK hands over either a string or {captchaVerifyParam}
+          const p = typeof sel === 'string' ? sel.trim() : ((sel && sel.captchaVerifyParam) || '').trim();
+          if (!p) { settled = false; return; }
+          box.hidden = true; box.innerHTML = '';
+          resolve({ param: p, region: c.region });
+        },
+        fail: () => {}
+      });
+    } catch (e) {
+      box.hidden = false;
+      box.innerHTML = '<div class="empty">' + esc(friendlyError(e.message)) + '</div>';
+      reject(e);
+    }
   });
 }
 
-async function claimAll() {
-  const btn = $('#call');
-  if (btn) btn.disabled = true;
-  try {
-    const r = await api('/v1/claim/all', { method: 'POST', body: '{}' });
-    const rows = r.results || [];
-    const ok = rows.filter(x => x.ok).length;
-    const need = rows.filter(x => x.status === 'perlu-app').length;
-    const msg = (ZB.lang === 'en' ? `${ok}/${rows.length} claimed` : `${ok}/${rows.length} diklaim`) + (need ? (ZB.lang === 'en' ? ` · ${need} need the app` : ` · ${need} perlu app`) : '');
-    toast(msg, ok ? 'ok' : 'bad');
-    scanClaim();
-  } catch (e) {
-    toast(e.message, 'bad');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function claimNow() {
-  const btn = $('#cnow');
-  if (btn) btn.disabled = true;
-  try {
+function pageClaim(view) {
+  view.innerHTML = skeleton('Klaim plan', 'Cek plan weekend/trial yang tersedia lalu klaim. Kampanye ber-captcha minta geser slider sekali — sisanya otomatis.') + `
+  <div class="toolbar"><button class="btn" id="cscan" type="button">Cek plan</button><button class="btn" id="call" type="button">Klaim semua akun</button><span class="small muted" id="cstat"></span></div>
+  <div class="card" id="cbody"><div class="empty">Tekan “Cek plan” untuk memindai penawaran.</div></div>
+  <div class="card" id="ccaptcha" style="margin-top:14px" hidden></div>
+  <div class="card" id="callres" style="margin-top:14px" hidden></div>
+  <div class="card" style="margin-top:14px"><h2>Riwayat klaim</h2><div id="chist"><div class="empty">Memuat…</div></div></div>`;
+  $('#cscan').onclick = () => scanClaim();
+  $('#call').onclick = async () => {
+    const btn = $('#call'), res = $('#callres');
+    btn.disabled = true;
+    if (res) { res.hidden = false; res.innerHTML = '<h2>Klaim semua akun</h2><div class="empty">Menyapu semua akun…</div>'; }
     try {
-      const r = await api('/v1/claim', { method: 'POST', body: '{}' });
-      toast(r.message || (ZB.lang === 'en' ? 'Claim request sent' : 'Permintaan klaim dikirim'), 'ok');
+      const r = await api('/v1/claim/all', { method: 'POST', body: '{}' });
+      const rows = (r.results || []).map(x => `<tr><td>${esc(x.account)}</td><td>${esc(x.plan || '-')}</td><td><span class="badge ${x.ok ? 'ok' : (x.status === 'perlu-app' ? 'warn' : 'bad')}">${esc(x.status)}</span></td><td class="dim small">${esc(x.message || '')}</td></tr>`).join('');
+      if (res) res.innerHTML = '<h2>Klaim semua akun</h2>' + (rows ? `<div class="tablewrap"><table><thead><tr><th>Akun</th><th>Plan</th><th>Status</th><th>Catatan</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="empty">Tidak ada akun tersimpan.</div>');
+      toast('Klaim semua: ' + ((r.results || []).filter(x => x.ok).length) + '/' + ((r.results || []).length) + ' akun sukses', 'ok');
       scanClaim();
-      return;
     } catch (e) {
-      if (!/captcha|3007/i.test(e.message)) throw e;
-    }
-    const solved = await solveClaimCaptcha();
-    const r = await api('/v1/claim', { method: 'POST', body: JSON.stringify({ captcha_param: solved.param, captcha_region: solved.region }) });
-    toast(r.message || (ZB.lang === 'en' ? 'Plan claimed' : 'Plan berhasil diklaim'), 'ok');
-    scanClaim();
-  } catch (e) {
-    toast(e.message, 'bad');
-  } finally {
-    if (btn) btn.disabled = false;
-  }
+      if (res) res.innerHTML = '<h2>Klaim semua akun</h2><div class="empty">' + esc(friendlyError(e.message)) + '</div>';
+      toast(e.message, 'bad');
+    } finally { btn.disabled = false; }
+  };
+  scanClaim();
 }
 
 async function scanClaim() {
@@ -1632,16 +1367,12 @@ async function scanClaim() {
     const c = await api('/v1/claim');
     const plans = c.plans || c.candidates || [];
     if (st) st.textContent = c.message || '';
-    const cnt = $('#csum-plans'), scan = $('#csum-scan');
-    if (cnt) cnt.textContent = plans.length;
-    if (scan) scan.textContent = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    body.innerHTML = plans.length ? `<div class="tablewrap"><table><thead><tr><th>Plan</th><th>Status</th><th>Mulai</th><th>Selesai</th><th>Unit</th></tr></thead><tbody>${plans.map(p => `<tr><td>${esc(p.name || p.plan_name || p.plan || p.id || '-')}</td><td>${esc(p.status || '-')}</td><td>${when(p.starts_at || p.start)}</td><td>${when(p.ends_at || p.end)}</td><td>${esc(p.units || p.total_units || '-')}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty"><b>Tidak ada plan yang bisa diklaim</b><span class="empty-hint">${esc(c.message || 'Coba pindai lagi nanti; penawaran biasanya muncul akhir pekan.')}</span></div>`;
-    if (!plans.length) renderClaimPoolHint(body, c.message);
-  } catch (e) { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    body.innerHTML = plans.length ? `<div class="tablewrap"><table><thead><tr><th>Plan</th><th>Prioritas</th><th>Mulai</th><th>Selesai</th><th></th></tr></thead><tbody>${plans.map(p => `<tr><td>${esc(p.name || p.plan_name || p.plan || p.id || '-')}</td><td class="num">${Number(p.priority) || 0}</td><td>${when(p.starts_at || p.start)}</td><td>${when(p.ends_at || p.end)}</td><td><button class="btn sm primary" data-cplan="${esc(p.plan_id || p.id)}" type="button">Klaim</button></td></tr>`).join('')}</tbody></table></div>` : `<div class="empty">${esc(c.message || 'Tidak ada plan yang bisa diklaim.')}</div>`;
+    body.querySelectorAll('[data-cplan]').forEach(b => b.onclick = () => doClaim(b.dataset.cplan));
+  } catch (e) { body.innerHTML = `<div class="empty">${esc(friendlyError(e.message))}</div>`; }
   try {
     const h = await api('/v1/claim/history');
     const list = h.claims || h.entries || [];
-    const hc = $('#csum-hist'); if (hc) hc.textContent = list.length;
     const box = $('#chist');
     if (box) box.innerHTML = list.length ? `<div class="tablewrap"><table><thead><tr><th>Waktu</th><th>Plan</th><th>Status</th></tr></thead><tbody>${list.map(x => `<tr><td>${when(x.at || x.created_at)}</td><td>${esc(x.plan || x.plan_id || '-')}</td><td>${esc(x.status || x.result || '-')}${x.message ? ' · ' + esc(x.message) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Belum ada riwayat.</div>';
   } catch (e) {
@@ -1649,144 +1380,275 @@ async function scanClaim() {
   }
 }
 
-async function renderClaimPoolHint(body, msg) {
-  try {
-    const p = await api('/v1/accounts/pool');
-    const others = (p.accounts || []).filter(a => !a.default && (a.rows || []).length && !a.error);
-    if (!others.length || !body) return;
-    const fmt = n => Number(n || 0).toLocaleString('id-ID');
-    const rows = others.map(a => `<tr><td><code>${esc(a.id)}</code></td><td>${(a.rows || []).map(r => `${esc(r.model)} · ${esc(r.plan_name || '')} · ${fmt(r.remaining)} / ${fmt(r.total)}`).join('<br>')}</td><td><button class="btn sm" type="button" data-acct="${esc(a.id)}">${ZB.lang === 'en' ? 'Use account' : 'Pakai akun'}</button></td></tr>`).join('');
-    body.innerHTML = `<div class="empty"><b>Akun aktif tidak punya plan</b><span class="empty-hint">${esc(msg || 'Tapi akun lain punya plan aktif:')}</span></div>
-      <div class="tablewrap"><table><thead><tr><th>Akun</th><th>Plan</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    body.querySelectorAll('button[data-acct]').forEach(btn => {
-      btn.onclick = async () => {
-        try {
-          await api('/v1/accounts/switch', { method: 'POST', body: JSON.stringify({ id: btn.dataset.acct }) });
-          toast(ZB.lang === 'en' ? 'Account switched' : 'Akun diganti', 'ok');
-          scanClaim();
-        } catch (e) { toast(e.message, 'bad'); }
-      };
-    });
-  } catch (_) { /* pool is best-effort */ }
+/* ---------------- sharing ---------------- */
+const shareState = { sort: 'new', posts: [], image: '' };
+const shareOpen = new Set();
+const SHARE_ICON_LIKE = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M5 7.2 7.6 2c.5 0 .9.4.9.9v2.6h3.3c.9 0 1.5.8 1.3 1.6l-1 4.4c-.1.6-.7 1-1.3 1H5M5 7.2H2.5v5.5H5z"/></svg>';
+const SHARE_ICON_COMMENT = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 3.2h11v7.1h-6L4.3 13v-2.7H2.5z"/></svg>';
+
+function shareClient() {
+  let id = localStorage.getItem('zbShareClient');
+  if (!id) {
+    id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('zbShareClient', id);
+  }
+  return id;
 }
 
-/* ---------------- docs ---------------- */
-function pageDocs(view) {
-  const base = location.origin;
-  const token = ZB.token || '<kunci-bridge>';
-  const model = 'glm-5.3-flash';
-  const chatURL = base + '/v1/chat/completions';
-  const curl = `curl ${chatURL} \\\n  -H "Authorization: Bearer ${token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model}","messages":[{"role":"user","content":"Halo"}],"stream":true}'`;
-  const anthCurl = `curl ${base}/v1/messages \\\n  -H "x-api-key: ${token}" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${model}","max_tokens":256,"messages":[{"role":"user","content":"Halo"}]}'`;
-  const endpoints = [
-    ['GET', '/health', 'Publik', 'Status lane, akun, dan JWT.'],
-    ['GET', '/v1/models', 'Publik', 'Katalog model aktif dan sisa grant.'],
-    ['GET', '/v1/quota', 'Publik', 'Grant per model per akun.'],
-    ['POST', '/v1/chat/completions', 'OpenAI', 'Chat completion, streaming opsional.'],
-    ['POST', '/v1/responses', 'OpenAI', 'Responses API.'],
-    ['POST', '/v1/messages', 'Anthropic', 'Messages API, streaming opsional.'],
-    ['POST', '/async/v1/chat/completions', 'OpenAI', 'Antrean async, balas 202 + id.'],
-    ['POST', '/async/v1/messages', 'Anthropic', 'Antrean async, balas 202 + id.'],
-    ['GET', '/async/v1/health', 'Publik', 'Status antrean async.'],
-    ['POST', '/mcp', 'MCP', 'JSON-RPC lewat streamable HTTP.'],
-    ['GET', '/v1/usage', 'Admin', 'Statistik pemakaian dan kecepatan.'],
-    ['GET', '/v1/events', 'Admin', 'SSE snapshot dan patch.'],
-    ['GET', '/v1/settings', 'Admin', 'Konfigurasi efektif bridge.'],
-    ['GET', '/v1/integration', 'Admin', 'Kunci dan URL integrasi.'],
-    ['GET', '/dashboard', 'Publik', 'Konsol ini.'],
-  ];
-  view.innerHTML = skeleton('API Docs', 'Base URL, endpoint, model, dan contoh request untuk klien.') + `
-  <div class="grid g2">
-    <article class="card">
-      <div class="card-head"><div><h2>OpenAI compatible</h2><p class="section-note">chat completions dan responses</p></div><span class="badge">/v1</span></div>
-      <p class="docs-label">Base URL</p>
-      <div class="row"><code class="docs-code grow">${esc(base)}/v1</code><button class="btn ghost sm" data-copy="${esc(base)}/v1" type="button">Salin</button></div>
-      <p class="docs-label">Header autentikasi</p>
-      <div class="row"><code class="docs-code grow">Authorization: Bearer ${esc(token)}</code><button class="btn ghost sm" data-copy="Authorization: Bearer ${esc(token)}" type="button">Salin</button></div>
-    </article>
-    <article class="card">
-      <div class="card-head"><div><h2>Anthropic</h2><p class="section-note">messages API</p></div><span class="badge">/v1</span></div>
-      <p class="docs-label">Base URL</p>
-      <div class="row"><code class="docs-code grow">${esc(base)}/v1</code><button class="btn ghost sm" data-copy="${esc(base)}/v1" type="button">Salin</button></div>
-      <p class="docs-label">Header autentikasi</p>
-      <div class="row"><code class="docs-code grow">x-api-key: ${esc(token)}</code><button class="btn ghost sm" data-copy="x-api-key: ${esc(token)}" type="button">Salin</button></div>
-    </article>
-  </div>
+function shareName() {
+  return (localStorage.getItem('zbShareName') || '').trim() || 'anon';
+}
 
-  <div class="docs-sec"><h2>Endpoint</h2><p class="section-note">Endpoint LLM memakai kunci bridge; endpoint admin memakai kunci yang sama.</p></div>
-  <div class="tablewrap"><table>
-    <thead><tr><th>Metode</th><th>Jalur</th><th>Lane</th><th>Keterangan</th></tr></thead>
-    <tbody>${endpoints.map(([m, p, lane, note]) => `<tr><td><span class="method ${m.toLowerCase()}">${m}</span></td><td class="mono">${esc(p)}</td><td>${esc(lane)}</td><td class="muted">${esc(note)}</td></tr>`).join('')}</tbody>
-  </table></div>
+function shareAgo(ms) {
+  const s = Math.max(0, Math.round((Date.now() - (Number(ms) || 0)) / 1000));
+  if (s < 60) return ZB.lang === 'en' ? 'just now' : 'baru saja';
+  const units = ZB.lang === 'en'
+    ? [[86400, 'd'], [3600, 'h'], [60, 'm']]
+    : [[86400, 'hari'], [3600, 'jam'], [60, 'menit']];
+  for (const [size, label] of units) {
+    if (s >= size) {
+      const n = Math.floor(s / size);
+      return ZB.lang === 'en' ? n + label + ' ago' : n + ' ' + label + ' lalu';
+    }
+  }
+  return ZB.lang === 'en' ? 'just now' : 'baru saja';
+}
 
-  <div class="docs-sec"><h2>Model</h2><p class="section-note" id="docs-model-note">Memuat dari /v1/models…</p></div>
-  <div class="tablewrap"><table>
-    <thead><tr><th>ID model</th><th>Nama</th><th>Pemilik</th><th class="num">Sisa grant</th></tr></thead>
-    <tbody id="docs-models"><tr><td colspan="4" class="muted">Memuat…</td></tr></tbody>
-  </table></div>
+function shareCount(n) {
+  if (ZB.lang === 'en') return n + ' post' + (n === 1 ? '' : 's');
+  return n + ' post';
+}
 
-  <article class="card mt14">
-    <div class="card-head">
-      <div><h2>Contoh request</h2><p class="section-note" id="docs-example-note">OpenAI chat completion, streaming.</p></div>
-      <div class="row"><button class="btn ghost sm" id="docs-mode" type="button">Anthropic</button><button class="btn ghost sm" id="docs-copy" type="button">Salin</button></div>
+function sharePostHTML(p) {
+  const open = shareOpen.has(p.id);
+  const image = p.image ? `<img class="share-img" src="${esc(p.image)}" alt="${esc(tr('Lampiran'))}: ${esc(p.title)}" width="960" height="540" loading="lazy">` : '';
+  const link = p.link ? `<a class="share-link" href="${esc(p.link)}" target="_blank" rel="noopener noreferrer">${esc(p.link)}</a>` : '';
+  const comments = p.comments || [];
+  const body = comments.map(c => `<div class="share-comment">
+      <div class="share-comment-meta"><b class="share-comment-author">${esc(c.author)}</b><span aria-hidden="true">·</span><time>${esc(shareAgo(c.createdAt))}</time></div>
+      <p class="share-comment-body">${esc(c.body)}</p>
+    </div>`).join('') || `<p class="small muted">${esc(tr('Belum ada komentar.'))}</p>`;
+  return `<article class="share-post" data-id="${esc(p.id)}">
+    <div class="share-post-head">
+      <h3 class="share-title">${esc(p.title)}</h3>
+      ${p.mine ? `<button class="btn ghost sm danger" data-del="${esc(p.id)}" type="button">${esc(tr('Hapus'))}</button>` : ''}
     </div>
-    <pre class="snippet" id="docs-curl">${esc(curl)}</pre>
+    <div class="share-meta"><span class="share-author">${esc(p.author)}</span><span aria-hidden="true">·</span><time datetime="${new Date(p.createdAt).toISOString()}">${esc(shareAgo(p.createdAt))}</time></div>
+    ${p.body ? `<p class="share-body">${esc(p.body)}</p>` : ''}
+    ${link}
+    ${image}
+    <div class="share-actions">
+      <button class="share-action ${p.liked ? 'on' : ''}" data-like="${esc(p.id)}" aria-pressed="${p.liked}" type="button">${SHARE_ICON_LIKE}<span>${p.likes}</span><span class="share-action-label">${esc(tr('Suka'))}</span></button>
+      <button class="share-action" data-comments="${esc(p.id)}" aria-expanded="${open}" type="button">${SHARE_ICON_COMMENT}<span>${comments.length}</span><span class="share-action-label">${esc(tr('Komentar'))}</span></button>
+    </div>
+    <section class="share-comments" ${open ? '' : 'hidden'} data-comments-body="${esc(p.id)}">
+      ${body}
+      <form class="share-comment-form" data-cform="${esc(p.id)}">
+        <input maxlength="1000" placeholder="${esc(tr('Tulis komentar...'))}" aria-label="${esc(tr('Komentar'))}" autocomplete="off">
+        <button class="btn sm" type="submit">${esc(tr('Kirim'))}</button>
+      </form>
+    </section>
   </article>`;
+}
 
-  const copy = view.querySelectorAll('[data-copy]');
-  copy.forEach(b => b.onclick = () => copyText(b.dataset.copy));
-  let anthropic = false;
-  $('#docs-mode').onclick = () => {
-    anthropic = !anthropic;
-    $('#docs-mode').textContent = anthropic ? 'OpenAI' : 'Anthropic';
-    $('#docs-example-note').textContent = anthropic ? 'Anthropic messages, non-stream.' : 'OpenAI chat completion, streaming.';
-    $('#docs-curl').textContent = anthropic ? anthCurl : curl;
+function renderShareFeed() {
+  const box = $('#share-feed');
+  if (!box) return;
+  const count = $('#share-count');
+  if (count) count.textContent = shareCount(shareState.posts.length);
+  const list = shareState.sort === 'top'
+    ? shareState.posts.slice().sort((a, b) => (b.likes - a.likes) || (b.createdAt - a.createdAt))
+    : shareState.posts;
+  box.innerHTML = list.length
+    ? list.map(sharePostHTML).join('')
+    : `<div class="empty share-empty"><b>${esc(tr('Belum ada post'))}</b><span>${esc(tr('Mulai dari form di atas.'))}</span></div>`;
+}
+
+async function loadSharing() {
+  const box = $('#share-feed');
+  if (box && !shareState.posts.length) box.innerHTML = `<div class="empty">${esc(tr('Memuat feed...'))}</div>`;
+  try {
+    const q = '/v1/sharing?sort=' + encodeURIComponent(shareState.sort) + '&client=' + encodeURIComponent(shareClient());
+    const d = await api(q);
+    shareState.posts = d.posts || [];
+    renderShareFeed();
+  } catch (e) {
+    if (box) box.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function replaceSharePost(post) {
+  const i = shareState.posts.findIndex(p => p.id === post.id);
+  if (i >= 0) shareState.posts[i] = post;
+  renderShareFeed();
+}
+
+function pageSharing(view) {
+  shareState.sort = 'new';
+  shareState.posts = [];
+  shareState.image = '';
+  shareOpen.clear();
+  const name = shareName();
+  view.innerHTML = skeleton('Sharing', 'Papan sharing lokal: post, link, gambar, dan komentar tersimpan di bridge ini.') + `
+  <form class="card share-composer" id="share-form">
+    <div class="share-compose-head">
+      <input id="share-title" maxlength="120" placeholder="Judul" aria-label="Judul" autocomplete="off">
+      <button class="btn primary" id="share-submit" type="submit">Post</button>
+    </div>
+    <textarea id="share-body" rows="3" maxlength="4000" placeholder="Tulis pesan..." aria-label="Tulis pesan..."></textarea>
+    <div id="share-preview" class="share-preview hidden"><img id="share-preview-img" alt="Pratinjau gambar"><button class="btn ghost sm" id="share-drop" type="button">Hapus gambar</button></div>
+    <div class="share-tools">
+      <label class="btn ghost sm share-attach" for="share-image">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 4.5h11v7h-11z"/><path d="m3.5 10 3-3 2.5 2.5 1.5-1.5 2 2"/><circle cx="10.7" cy="6.3" r=".9"/></svg>
+        <span>Gambar</span>
+        <input id="share-image" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+      </label>
+      <input id="share-link" class="grow" maxlength="600" placeholder="Link (opsional)" aria-label="Link (opsional)" autocomplete="off">
+      <label class="share-name-wrap"><span class="small muted">Nama</span><input id="share-name" maxlength="40" value="${esc(name === 'anon' ? '' : name)}" placeholder="Nama" aria-label="Nama tampilan" autocomplete="off"></label>
+    </div>
+    <p class="small muted share-warn">Jangan posting token privat. Siapa pun yang membuka bridge ini bisa membaca papan.</p>
+  </form>
+  <div class="share-feed-head">
+    <h2>Feed</h2><span class="small muted" id="share-count"></span><span class="spacer"></span>
+    <select id="share-sort" aria-label="Urutkan post"><option value="new">Terbaru</option><option value="top">Terpopuler</option></select>
+    <button class="btn ghost sm" id="share-refresh" type="button">Muat ulang</button>
+  </div>
+  <div id="share-feed" class="share-feed" aria-live="polite"><div class="empty">${esc(tr('Memuat feed...'))}</div></div>`;
+
+  const form = $('#share-form');
+  const nameInput = $('#share-name');
+  nameInput.oninput = () => localStorage.setItem('zbShareName', nameInput.value.trim());
+  $('#share-image').onchange = ev => {
+    const file = ev.target.files && ev.target.files[0];
+    if (!file) return;
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { toast(tr('Hanya file gambar yang didukung'), 'bad'); ev.target.value = ''; return; }
+    if (file.size > 120 * 1024) { toast(tr('Gambar maksimal 120 KB'), 'bad'); ev.target.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      shareState.image = String(reader.result || '');
+      $('#share-preview-img').src = shareState.image;
+      $('#share-preview').classList.remove('hidden');
+    };
+    reader.onerror = () => toast(tr('Gambar gagal dibaca'), 'bad');
+    reader.readAsDataURL(file);
+    ev.target.value = '';
   };
-  $('#docs-copy').onclick = () => copyText($('#docs-curl').textContent);
+  $('#share-drop').onclick = () => {
+    shareState.image = '';
+    $('#share-preview').classList.add('hidden');
+    $('#share-preview-img').removeAttribute('src');
+  };
+  $('#share-sort').onchange = ev => { shareState.sort = ev.target.value === 'top' ? 'top' : 'new'; loadSharing(); };
+  $('#share-refresh').onclick = () => loadSharing();
 
-  api('/v1/models').then(d => {
-    const rows = d.data || [];
-    const note = $('#docs-model-note');
-    if (note) note.textContent = rows.length ? rows.length + ' model aktif' : 'Katalog kosong.';
-    const body = $('#docs-models');
-    if (!body) return;
-    body.innerHTML = rows.length ? rows.map(m => `<tr>
-      <td class="mono">${esc(m.id)}</td>
-      <td>${esc(prettyModel(m.id))}</td>
-      <td class="muted">${esc(m.owned_by || 'zcode-plan')}</td>
-      <td class="num">${m.plan_remaining_tokens != null ? fmtN(m.plan_remaining_tokens) : '–'}</td>
-    </tr>`).join('') : '<tr><td colspan="4" class="muted">Belum ada model.</td></tr>';
-  }).catch(e => {
-    const note = $('#docs-model-note');
-    if (note) note.textContent = e.message;
+  form.onsubmit = async ev => {
+    ev.preventDefault();
+    const title = $('#share-title').value.trim();
+    const body = $('#share-body').value.trim();
+    const link = $('#share-link').value.trim();
+    const author = shareName();
+    if (!title) { toast(tr('Judul wajib diisi'), 'bad'); $('#share-title').focus(); return; }
+    if (!body && !link && !shareState.image) { toast(tr('Isi, link, atau gambar wajib ada'), 'bad'); $('#share-body').focus(); return; }
+    const btn = $('#share-submit');
+    btn.disabled = true;
+    try {
+      const r = await api('/v1/sharing', { method: 'POST', body: JSON.stringify({ title, body, link, image: shareState.image, author, client: shareClient() }) });
+      shareState.posts.unshift(r.post);
+      shareState.image = '';
+      form.reset();
+      nameInput.value = author === 'anon' ? '' : author;
+      $('#share-preview').classList.add('hidden');
+      $('#share-preview-img').removeAttribute('src');
+      renderShareFeed();
+      toast(tr('Post terkirim'), 'ok');
+      $('#share-title').focus();
+    } catch (e) { toast(e.message, 'bad'); }
+    finally { btn.disabled = false; }
+  };
+
+  const feed = $('#share-feed');
+  feed.addEventListener('click', async ev => {
+    const likeBtn = ev.target.closest('[data-like]');
+    if (likeBtn) {
+      likeBtn.disabled = true;
+      try {
+        const r = await api('/v1/sharing/like', { method: 'POST', body: JSON.stringify({ id: likeBtn.dataset.like, client: shareClient() }) });
+        replaceSharePost(r.post);
+      } catch (e) { toast(e.message, 'bad'); likeBtn.disabled = false; }
+      return;
+    }
+    const commentBtn = ev.target.closest('[data-comments]');
+    if (commentBtn) {
+      const id = commentBtn.dataset.comments;
+      if (shareOpen.has(id)) shareOpen.delete(id); else shareOpen.add(id);
+      renderShareFeed();
+      if (shareOpen.has(id)) {
+        const input = feed.querySelector(`[data-comments-body="${CSS.escape(id)}"] input`);
+        if (input) input.focus();
+      }
+      return;
+    }
+    const delBtn = ev.target.closest('[data-del]');
+    if (delBtn) {
+      const post = shareState.posts.find(p => p.id === delBtn.dataset.del);
+      if (!confirm(tr('Hapus post ini?'))) return;
+      delBtn.disabled = true;
+      try {
+        await api('/v1/sharing?id=' + encodeURIComponent(delBtn.dataset.del) + '&client=' + encodeURIComponent(shareClient()), { method: 'DELETE' });
+        shareState.posts = shareState.posts.filter(p => p.id !== delBtn.dataset.del);
+        renderShareFeed();
+        toast(tr('Post dihapus'), 'ok');
+      } catch (e) { toast(e.message, 'bad'); delBtn.disabled = false; }
+    }
   });
+  feed.addEventListener('submit', async ev => {
+    const cform = ev.target.closest('[data-cform]');
+    if (!cform) return;
+    ev.preventDefault();
+    const input = cform.querySelector('input');
+    const body = input.value.trim();
+    if (!body) return;
+    const btn = cform.querySelector('button');
+    btn.disabled = true;
+    try {
+      const r = await api('/v1/sharing/comment', { method: 'POST', body: JSON.stringify({ id: cform.dataset.cform, author: shareName(), body, client: shareClient() }) });
+      shareOpen.add(cform.dataset.cform);
+      replaceSharePost(r.post);
+      const next = feed.querySelector(`[data-comments-body="${CSS.escape(cform.dataset.cform)}"] input`);
+      if (next) next.focus();
+    } catch (e) { toast(e.message, 'bad'); btn.disabled = false; }
+  });
+
+  loadSharing();
 }
 
 /* ---------------- settings ---------------- */
 async function pageSettings(view) {
   view.innerHTML = skeleton('Pengaturan', 'Nilai efektif proses ini. Perubahan env butuh restart.') + `
-  <div class="grid g2 set-grid">
+  <div class="grid g2">
     <div class="card"><h2>Bridge</h2><div id="setbridge"><div class="empty">Memuat…</div></div></div>
-    <div class="set-side">
-      <div class="card"><h2>Token & tema</h2>
-        <label class="field"><span>Bearer token (sesi tab)</span><input id="settoken" type="password" placeholder="belum di-set" autocomplete="off"></label>
-        <div class="row mt10"><button class="btn" id="settokensave" type="button">Simpan token</button><button class="btn ghost" id="settokenclear" type="button">Hapus</button></div>
-        <hr class="hr-line">
-        <div class="row"><span class="small muted">Tema</span><span class="spacer"></span><button class="btn ghost sm" id="settheme" type="button">Ganti tema</button></div>
-      </div>
-      <div class="card"><h2>Data & alat</h2>
-        <div class="row"><a class="btn ghost sm" href="/classic" target="_blank" rel="noopener">Dashboard klasik</a><a class="btn ghost sm" href="/health" target="_blank" rel="noopener">/health</a><a class="btn ghost sm" href="/v1/models" target="_blank" rel="noopener">/v1/models</a></div>
-        <p class="small muted mt10">Capture dan flag lain dibaca saat start; ubah env lalu restart bridge.</p>
-      </div>
+    <div class="card"><h2>Token & tema</h2>
+      <label class="field"><span>Bearer token (sesi tab)</span><input id="settoken" type="password" placeholder="belum di-set" autocomplete="off"></label>
+      <label class="check"><input type="checkbox" id="setremember"> Ingat di browser ini <span class="muted small">(jangan di komputer bersama)</span></label>
+      <div class="row" style="margin-top:10px"><button class="btn" id="settokensave" type="button">Simpan token</button><button class="btn ghost" id="settokenclear" type="button">Hapus</button></div>
+      <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+      <div class="row"><span class="small muted">Tema</span><span class="spacer"></span><button class="btn ghost sm" id="settheme" type="button">Ganti tema</button></div>
     </div>
   </div>
-  <div class="card mt14"><h2>Integrasi agen <span class="muted">OpenAI compatible</span></h2>
+  <div class="card" style="margin-top:14px"><h2>Integrasi agen <span class="muted">OpenAI compatible</span></h2>
     <div id="intbody"><div class="empty">Memuat...</div></div>
   </div>
-  <div class="card mt14"><h2>Environment</h2><div id="setenv"></div></div>`;
+  <div class="card" style="margin-top:14px"><h2>Environment</h2><div id="setenv"></div></div>
+  <div class="card" style="margin-top:14px"><h2>Data & alat</h2>
+    <div class="row"><a class="btn ghost sm" href="/classic" target="_blank" rel="noopener">Dashboard klasik</a><a class="btn ghost sm" href="/overlay" target="_blank" rel="noopener">Overlay</a><a class="btn ghost sm" href="/health" target="_blank" rel="noopener">/health</a><a class="btn ghost sm" href="/v1/models" target="_blank" rel="noopener">/v1/models</a><button class="btn ghost sm" id="setshowstart" type="button">Tampilkan kartu "Mulai di sini"</button></div>
+    <p class="small muted" style="margin-top:10px">Capture dan flag lain dibaca saat start; ubah env lalu restart bridge.</p>
+  </div>`;
   $('#settheme').onclick = toggleTheme;
-  $('#settokensave').onclick = () => { ZB.token = $('#settoken').value.trim(); sessionStorage.setItem('zbToken', ZB.token); toast('Token disimpan', 'ok'); connectSSE(); refreshHealth(); };
-  $('#settokenclear').onclick = () => { ZB.token = ''; sessionStorage.removeItem('zbToken'); $('#settoken').value = ''; toast('Token dihapus', 'ok'); connectSSE(); };
+  $('#setshowstart').onclick = () => { localStorage.removeItem('zbHideStart'); toast('Kartu "Mulai di sini" tampil lagi di Ringkasan', 'ok'); };
+  $('#setremember').checked = !!localStorage.getItem('zbTokenPersist');
+  $('#settoken').value = ZB.token;
+  $('#settokensave').onclick = () => { applyToken($('#settoken').value.trim(), $('#setremember').checked); toast('Token disimpan', 'ok'); connectSSE(); refreshHealth(); };
+  $('#settokenclear').onclick = () => { clearToken(); $('#settoken').value = ''; $('#setremember').checked = false; toast('Token dihapus', 'ok'); connectSSE(); };
   try {
     const s = await api('/v1/settings');
     const rows = [
@@ -1805,53 +1667,32 @@ async function pageSettings(view) {
   loadIntegration();
 }
 
-function integrationCurl(s) {
-  const key = s.key || '<kunci-api>';
-  const body = JSON.stringify({ model: s.default_model, messages: [{ role: 'user', content: 'Halo' }], stream: true });
-  return `curl ${s.endpoints.chat} \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '${body}'`;
-}
-
 async function loadIntegration() {
   const box = $('#intbody');
   if (!box) return;
   box.innerHTML = '<div class="empty">Memuat...</div>';
   try {
     const s = await api('/v1/integration');
-    const curl = integrationCurl(s);
     const source = s.key_source === 'env' ? 'dari env ZCODE_BRIDGE_TOKEN (hanya baca)' : (s.key_source === 'file' ? 'tersimpan di data/agent-key.json' : 'belum di-set, bridge terbuka di loopback');
     box.innerHTML = `
+      <p class="small muted" style="margin:0 0 12px">Cara kerjanya sederhana: aplikasi (Claude Code, Codex, script Python) mengirim request ke <b>alamat + kunci</b> di bawah, lalu bridge meneruskannya ke ZCode memakai akunmu. Tidak ada biaya tambahan — yang terpakai kuota plan-mu.</p>
       <label class="field"><span>Kunci API (Bearer hilir)</span>
-        <div class="row"><input id="intkey" class="grow mono" ${s.editable ? '' : 'readonly'} value="${esc(s.key || '')}" placeholder="belum di-set"><button class="btn ghost sm" id="intcopy" type="button">Salin</button></div>
+        <div class="row"><input id="intkey" class="grow mono" readonly value="${esc(s.key || '')}" placeholder="belum di-set"><button class="btn ghost sm" id="intcopy" type="button">Salin</button></div>
       </label>
-      <p class="small muted int-note">${esc(s.masked_key ? 'Tampilan: ' + s.masked_key + ' - ' : '')}${esc(source)}</p>
+      <p class="small muted" style="margin:8px 0">${esc(s.masked_key ? 'Tampilan: ' + s.masked_key + ' - ' : '')}${esc(source)}</p>
       <label class="field"><span>Base URL</span>
         <div class="row"><input id="intbase" class="grow mono" readonly value="${esc(s.base_url)}"><button class="btn ghost sm" id="intcopybase" type="button">Salin</button></div>
       </label>
-      <div class="row mt10"><span class="small muted">Model default ${esc(s.default_model)}</span><span class="spacer"></span>
-        ${s.editable ? '<button class="btn ghost sm" id="intsave" type="button">Simpan kunci</button>' : ''}
-        <button class="btn ghost sm" id="introtate" type="button">${s.key_present ? 'Acak kunci' : 'Buat kunci'}</button>
+      <div class="row" style="margin-top:10px"><span class="small muted">Model default ${esc(s.default_model)}</span><span class="spacer"></span>
+        <button class="btn ghost sm" id="introtate" type="button">${s.key_present ? 'Ganti kunci' : 'Buat kunci'}</button>
         <button class="btn ghost sm danger" id="intdelete" type="button" ${s.key_present && s.editable ? '' : 'disabled'}>Hapus</button>
       </div>
-      <div class="row int-head"><span class="small muted">Contoh permintaan</span><span class="spacer"></span><button class="btn ghost sm" id="intcurlcopy" type="button">Salin contoh</button></div>
-      <pre class="snippet" id="intcurl">${esc(curl)}</pre>
-      <p class="small muted int-tail">Klien lain memakai kunci ini sebagai <span class="mono">Authorization: Bearer</span>. Ketik kunci sendiri lalu Simpan, atau Acak untuk kunci acak. Kunci env tidak bisa diubah dari dashboard.</p>`;
+      <div class="row" style="margin:14px 0 6px"><span class="small muted">Contoh koneksi — pilih aplikasimu, salin, jalankan</span></div>
+      <div id="intsnip"></div>
+      <p class="small muted" style="margin-top:8px">Klien lain memakai kunci ini sebagai <span class="mono">Authorization: Bearer</span>. Kunci env tidak bisa diubah dari dashboard.</p>`;
     $('#intcopy').onclick = () => copyText(s.key || '');
     $('#intcopybase').onclick = () => copyText(s.base_url);
-    $('#intcurlcopy').onclick = () => copyText(curl);
-    const save = $('#intsave');
-    if (save) save.onclick = async () => {
-      const key = ($('#intkey').value || '').trim();
-      if (!key) { toast('Kunci tidak boleh kosong', 'bad'); $('#intkey').focus(); return; }
-      if (s.key_present && !confirm('Simpan kunci baru? Klien yang memakai kunci lama langsung ditolak.')) return;
-      save.disabled = true;
-      try {
-        const r = await api('/v1/integration/key', { method: 'POST', body: JSON.stringify({ key }) });
-        ZB.token = r.key;
-        sessionStorage.setItem('zbToken', r.key);
-        toast('Kunci disimpan dan dipakai tab ini', 'ok');
-        connectSSE(); refreshHealth(); loadIntegration();
-      } catch (e) { toast(e.message, 'bad'); save.disabled = false; }
-    };
+    snippetTabs($('#intsnip'), s);
     const rotate = $('#introtate');
     rotate.disabled = !s.editable;
     rotate.onclick = async () => {
@@ -1886,18 +1727,32 @@ async function loadIntegration() {
 async function refreshHealth() {
   try { ZB.health = await api('/health'); } catch (e) { return; }
   const h = ZB.health;
-  const dot = $('#livedot'); if (dot) { dot.classList.remove('bad'); dot.classList.add('on'); }
-  const sub = $('#brandsub'); if (sub) sub.textContent = h.auth || 'lane lokal';
-  const ver = $('#sidever'); if (ver && h.version) ver.textContent = 'v' + h.version;
-  const accounts = h.accounts || [];
-  const acct = accounts.find(a => a.active || a.default) || accounts[0];
-  const init = $('#sideacct-init'); if (init) init.textContent = acct ? accountInitials(acct.label || acct.id) : '–';
-  const name = $('#sideacct-name'); if (name) name.textContent = acct ? (acct.label || acct.id) : 'Belum ada akun';
-  const asub = $('#sideacct-sub'); if (asub) asub.textContent = acct ? (acct.email || acct.id) : 'hubungkan lewat halaman Akun';
-  if (ZB.page === 'overview') { patchOverview(); renderAccountCard(); }
-  if (ZB.page === 'session') renderSession();
-  if (ZB.page === 'lane') renderLane();
-  if (ZB.page === 'quota') renderQuota();
+  const dot = $('#livedot'); if (dot) dot.classList.add('live');
+  const lane = $('#toplane'); if (lane) lane.textContent = h.lane || 'lane';
+  const sub = $('#brandsub');
+  if (sub) {
+    // The sidebar line describes the SESSION state, not the server config —
+    // "bridge token required" under the logo reads like an error to newcomers.
+    const protectedLane = (h.auth || '').includes('bridge token required');
+    if (protectedLane) {
+      sub.textContent = ZB.token ? 'terlindungi · token aktif' : 'terlindungi · klik untuk set token';
+      sub.title = 'Kunci API bridge aktif. Klien dan dashboard harus memakai Bearer token.';
+      sub.style.cursor = ZB.token ? '' : 'pointer';
+      sub.onclick = ZB.token ? null : openToken;
+    } else {
+      sub.textContent = h.auth || '';
+      sub.title = '';
+      sub.style.cursor = '';
+      sub.onclick = null;
+    }
+  }
+  const user = $('#sideuser');
+  if (user) {
+    const accs = h.accounts || [];
+    const primary = accs.find(a => a.default) || accs[0];
+    user.textContent = primary ? (primary.label || primary.id || 'bridge lokal') : 'belum ada akun';
+  }
+  if (ZB.page === 'overview' || ZB.page === 'accounts') { patchOverview(); renderAccountCard(); }
 }
 
 function connectSSE() {
@@ -1910,7 +1765,6 @@ function connectSSE() {
     if (res.status === 401) { openToken(); return; }
     if (!res.ok || !res.body) throw new Error('SSE ' + res.status);
     $('#livedot').classList.add('live');
-    const lw = $('#liveword'); if (lw) lw.textContent = 'terhubung';
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -1927,7 +1781,6 @@ function connectSSE() {
   }).catch(err => {
     if (err.name === 'AbortError') return;
     $('#livedot').classList.remove('live');
-    const lw = $('#liveword'); if (lw) lw.textContent = 'menyambung';
     setTimeout(() => { if (ZB.esAbort === ctrl) connectSSE(); }, 2500);
   });
 }
@@ -1939,128 +1792,40 @@ function handleEventFrame(frame) {
   let msg; try { msg = JSON.parse(data); } catch (e) { return; }
   if (msg.health) ZB.health = msg.health;
   if (msg.usage) ZB.usage = msg.usage;
+  if (msg.net) ZB.net = msg.net;
   patchSideStats();
   const h = ZB.health || {};
-  if (document.getElementById('st-accounts') && ZB.page === 'overview') patchOverview();
+  const lane = $('#toplane'); if (lane) lane.textContent = h.lane || 'lane';
+  if (document.getElementById('ov-tps') && ZB.page === 'overview') patchOverview();
   if (document.getElementById('ur-last') && ZB.page === 'usage') renderUsage();
-  if (document.getElementById('req-list') && ZB.page === 'requests') renderRequests();
-  if (document.getElementById('ln-lane') && ZB.page === 'lane') renderLane();
-  if (document.getElementById('qu-list') && ZB.page === 'quota') renderQuota();
-  if (document.getElementById('ses-tps') && ZB.page === 'session') renderSession();
+  if (document.getElementById('ntiles') && ZB.page === 'network') renderNetwork();
 }
 
 /* ---------------- boot ---------------- */
-function toggleTheme() { cycleTheme(); }
-
-const THEME_KEY = 'zbTheme';
-function themeMode() {
-  const v = localStorage.getItem(THEME_KEY);
-  return v === 'light' || v === 'dark' || v === 'system' ? v : 'system';
-}
-function systemDark() {
-  return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-}
-function applyTheme(mode) {
-  document.documentElement.dataset.theme = mode === 'system' ? (systemDark() ? 'dark' : 'light') : mode;
-  localStorage.setItem(THEME_KEY, mode);
-  $$('input[name="theme"]').forEach(i => { i.checked = i.value === mode; });
-}
-function cycleTheme() {
-  const order = ['system', 'dark', 'light'];
-  applyTheme(order[(order.indexOf(themeMode()) + 1) % order.length]);
+function toggleTheme() {
+  const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = cur;
+  localStorage.setItem('zbTheme', cur);
 }
 
 function boot() {
-  applyTheme(themeMode());
-  $$('input[name="theme"]').forEach(i => i.addEventListener('change', () => { if (i.checked) applyTheme(i.value); }));
-  if (window.matchMedia) {
-    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (themeMode() === 'system') applyTheme('system'); });
-  }
-  const logout = $('#logoutbtn');
-  if (logout) logout.onclick = () => {
-    if (ZB.esAbort) ZB.esAbort.abort();
-    sessionStorage.removeItem('zbToken');
-    ZB.token = '';
-    location.reload();
-  };
+  document.documentElement.dataset.theme = localStorage.getItem('zbTheme') || 'dark';
+  $('#themebtn').onclick = toggleTheme;
+  $('#tokenbtn').onclick = openToken;
+  $('#navtoggle').onclick = () => document.body.classList.toggle('navopen');
   $('#tokenform').addEventListener('submit', e => {
     e.preventDefault();
-    ZB.token = $('#tokeninput').value.trim();
-    sessionStorage.setItem('zbToken', ZB.token);
+    applyToken($('#tokeninput').value.trim(), $('#tokenremember') && $('#tokenremember').checked);
     const d = $('#tokendlg'); if (d.close) d.close(); else d.removeAttribute('open');
     toast('Token disimpan', 'ok');
     connectSSE(); route(); refreshHealth();
   });
   $('#tokencancel').onclick = () => { const d = $('#tokendlg'); if (d.close) d.close(); else d.removeAttribute('open'); };
-  $('#gateform').addEventListener('submit', async e => {
-    e.preventDefault();
-    const err = $('#gateerr');
-    const btn = $('#gateform button[type="submit"]');
-    const pass = ($('#gatepass').value || '').trim();
-    if (!pass) { showGateError('Kata sandi tidak boleh kosong.'); $('#gatepass').focus(); return; }
-    btn.disabled = true;
-    if (err) err.hidden = true;
-    const ok = await tokenOK(pass);
-    btn.disabled = false;
-    if (!ok) { showGateError('Kata sandi salah.'); $('#gatepass').select(); return; }
-    ZB.token = pass;
-    sessionStorage.setItem('zbToken', pass);
-    $('#gatepass').value = '';
-    startApp();
-  });
-  authenticate();
-}
-
-async function tokenOK(token) {
-  try {
-    const res = await fetch('/v1/settings', { cache: 'no-store', headers: token ? { Authorization: 'Bearer ' + token } : {} });
-    return res.status === 200;
-  } catch (e) {
-    return false;
-  }
-}
-
-async function authenticate() {
-  const saved = (sessionStorage.getItem('zbToken') || '').trim();
-  if (saved && await tokenOK(saved)) {
-    ZB.token = saved;
-    startApp();
-    return;
-  }
-  sessionStorage.removeItem('zbToken');
-  try {
-    const res = await fetch('/v1/integration', { cache: 'no-store' });
-    if (res.ok) {
-      const s = await res.json();
-      if (!s.key_present) { startApp(); return; }
-    }
-  } catch (e) {}
-  const app = $('#app');
-  if (app) app.hidden = true;
-  const gate = $('#gate');
-  if (gate) gate.hidden = false;
-  const pass = $('#gatepass');
-  if (pass) setTimeout(() => pass.focus(), 50);
-}
-
-function showGateError(msg) {
-  const err = $('#gateerr');
-  if (!err) return;
-  err.textContent = msg;
-  err.hidden = false;
-}
-
-function startApp() {
-  if (ZB.started) return;
-  ZB.started = true;
-  const app = $('#app');
-  if (app) app.hidden = false;
-  const gate = $('#gate');
-  if (gate) gate.hidden = true;
   route();
   applyLanguage();
   refreshHealth();
-  api('/v1/usage').then(u => { ZB.usage = u; patchSideStats(); if (ZB.page === 'overview') patchOverview(); if (ZB.page === 'usage') renderUsage(); if (ZB.page === 'requests') renderRequests(); if (ZB.page === 'session') renderSession(); }).catch(() => {});
+  api('/v1/usage').then(u => { ZB.usage = u; patchSideStats(); if (ZB.page === 'overview') patchOverview(); if (ZB.page === 'usage') renderUsage(); }).catch(() => {});
+  api('/v1/net').then(n => { ZB.net = n; patchSideStats(); if (ZB.page === 'overview') patchOverview(); if (ZB.page === 'network') renderNetwork(); }).catch(() => {});
   connectSSE();
   setInterval(refreshHealth, 15000);
   document.addEventListener('keydown', e => {
